@@ -1078,63 +1078,81 @@ function AppShell() {
             <div className={`header-burger-menu ${mobileOpen ? 'open' : ''}`} role="menu" aria-hidden={!mobileOpen}>
               <div className="header-menu-block">
                 <div className="header-menu-label">
-                  <Languages size={16} />
-                  <span>{t.headerMenu.language}</span>
-                </div>
-                <div className="lang-switch" aria-label={t.headerMenu.language}>
-                  {(['kg', 'ru', 'en'] as const).map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      className={language === item ? 'lang active' : 'lang'}
-                      onClick={() => {
-                        setLanguage(item)
-                        setMobileOpen(false)
-                      }}
-                    >
-                      {item.toUpperCase()}
-                    </button>
-                  ))}
-                </div>
+                 <span>Навигация</span>
+               </div>
+               <nav className="header-mobile-nav" aria-label="Mobile navigation">
+                 {navItems.map((item) => (
+                   <NavLink
+                     key={item.to}
+                     to={item.to}
+                     className={({ isActive }) => (isActive ? 'header-mobile-nav-item active' : 'header-mobile-nav-item')}
+                     onClick={() => setMobileOpen(false)}
+                   >
+                     {item.label}
+                   </NavLink>
+                 ))}
+               </nav>
+             </div>
+
+             <div className="header-menu-block">
+               <div className="header-menu-label">
+                 <Languages size={16} />
+                 <span>{t.headerMenu.language}</span>
+               </div>
+               <div className="lang-switch" aria-label={t.headerMenu.language}>
+                 {(['kg', 'ru', 'en'] as const).map((item) => (
+                   <button
+                     key={item}
+                     type="button"
+                     className={language === item ? 'lang active' : 'lang'}
+                     onClick={() => {
+                       setLanguage(item)
+                       setMobileOpen(false)
+                     }}
+                   >
+                     {item.toUpperCase()}
+                   </button>
+                 ))}
+               </div>
               </div>
 
-              <div className="header-menu-block">
-                <div className="header-menu-label">
-                  {theme === 'light' ? <Sun size={16} /> : <Moon size={16} />}
-                  <span>{t.headerMenu.theme}</span>
-                </div>
-                <button
-                  type="button"
-                  className="header-theme-toggle"
-                  onClick={() => {
-                    setTheme((current) => (current === 'light' ? 'dark' : 'light'))
-                    setMobileOpen(false)
-                  }}
-                >
-                  {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
-                  <span>{theme === 'light' ? t.headerMenu.night : t.headerMenu.day}</span>
-                </button>
-              </div>
+             <div className="header-menu-block">
+               <div className="header-menu-label">
+                 {theme === 'light' ? <Sun size={16} /> : <Moon size={16} />}
+                 <span>{t.headerMenu.theme}</span>
+               </div>
+               <button
+                 type="button"
+                 className="header-theme-toggle"
+                 onClick={() => {
+                   setTheme((current) => (current === 'light' ? 'dark' : 'light'))
+                   setMobileOpen(false)
+                 }}
+               >
+                 {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
+                 <span>{theme === 'light' ? t.headerMenu.night : t.headerMenu.day}</span>
+               </button>
+             </div>
 
-              {isAdminUser && (
-                <div className="header-menu-block">
-                  <Link to="/admin" className="btn btn-primary full-width" onClick={() => setMobileOpen(false)}>Admin Panel</Link>
-                </div>
-              )}
+             {isAdminUser && (
+               <div className="header-menu-block">
+                 <Link to="/admin" className="btn btn-primary full-width" onClick={() => setMobileOpen(false)}>Admin Panel</Link>
+               </div>
+             )}
 
-              <div className="mobile-auth-actions">
-                {isLoggedIn && user ? (
-                  <>
-                    <Link to="/dashboard" className="btn btn-secondary full-width" onClick={() => setMobileOpen(false)}>{user.name}</Link>
-                    <button type="button" className="btn btn-primary full-width" onClick={() => { setMobileOpen(false); handleLogout() }}>{t.dashboard.logout}</button>
-                  </>
-                ) : (
-                  <>
-                    <Link to="/auth" className="btn btn-secondary full-width" onClick={() => setMobileOpen(false)}>{t.buttons.login}</Link>
-                    <Link to="/auth" className="btn btn-primary full-width" onClick={() => setMobileOpen(false)}>{t.buttons.signup}</Link>
-                  </>
-                )}
-              </div>
+             <div className="mobile-auth-actions">
+               {isLoggedIn && user ? (
+                 <>
+                   <Link to="/dashboard" className="btn btn-secondary full-width" onClick={() => setMobileOpen(false)}>{user.name}</Link>
+                   <button type="button" className="btn btn-primary full-width" onClick={() => { setMobileOpen(false); handleLogout() }}>{t.dashboard.logout}</button>
+                 </>
+               ) : (
+                 <>
+                   <Link to="/auth" className="btn btn-secondary full-width" onClick={() => setMobileOpen(false)}>{t.buttons.login}</Link>
+                   <Link to="/auth" className="btn btn-primary full-width" onClick={() => setMobileOpen(false)}>{t.buttons.signup}</Link>
+                 </>
+               )}
+             </div>
             </div>
           </div>
         </header>

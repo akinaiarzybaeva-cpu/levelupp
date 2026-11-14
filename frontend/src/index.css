@@ -248,6 +248,33 @@ a, button, input, textarea, select {
   gap: 10px;
 }
 
+.header-mobile-nav {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.header-mobile-nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-align: center;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.header-mobile-nav-item.active,
+.header-mobile-nav-item:hover {
+  background: rgba(122, 236, 179, 0.14);
+  color: #ffffff;
+}
+
 .header-menu-label {
   display: inline-flex;
   align-items: center;
@@ -766,12 +793,16 @@ a, button, input, textarea, select {
   }
 
   .nav {
-    display: none;
+    display: none !important;
   }
 
   .nav-actions {
     margin-left: auto;
     gap: 8px;
+  }
+
+  .header-mobile-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .lang-switch {
