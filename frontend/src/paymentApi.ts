@@ -1,6 +1,20 @@
 import type { PaymentMethod, SubscriptionPlanId, UserSubscription } from './subscriptionService'
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:8787'
+function normalizeApiBaseUrl(value?: string): string {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+
+  const withoutTrailingSlash = raw.replace(/\/+$/, '')
+  try {
+    const url = new URL(withoutTrailingSlash)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return withoutTrailingSlash
+  }
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL)
+  || (import.meta.env.PROD ? 'https://levelupp-2b3j.onrender.com' : 'http://localhost:8787')
 
 type ApiSubscriptionResponse = {
   planId: SubscriptionPlanId | 'free'

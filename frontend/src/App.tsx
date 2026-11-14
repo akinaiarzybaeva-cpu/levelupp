@@ -378,11 +378,27 @@ function setStoredValue<T>(key: string, value: T) {
   if (typeof window !== 'undefined') window.localStorage.setItem(key, JSON.stringify(value))
 }
 
+function normalizeApiBaseUrl(value?: string): string {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+
+  const withoutTrailingSlash = raw.replace(/\/+$/, '')
+  try {
+    const url = new URL(withoutTrailingSlash)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return withoutTrailingSlash
+  }
+}
+
 function getApiBaseUrl() {
-  const configured = String(import.meta.env.VITE_API_BASE_URL ?? '').trim()
-  const candidates = [configured || undefined, 'http://localhost:8787', 'http://127.0.0.1:8787']
-  const normalized = candidates.filter(Boolean).map((value) => value!.replace(/\/+$/, ''))
-  return normalized[0] ?? 'http://localhost:8787'
+  const configured = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL)
+  if (configured) return configured
+
+  const isLocalDevelopment = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
+  if (isLocalDevelopment) return 'http://localhost:8787'
+
+  return import.meta.env.PROD ? 'https://levelupp-2b3j.onrender.com' : 'http://localhost:8787'
 }
 
 const API_BASE_URL = getApiBaseUrl()
