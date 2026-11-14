@@ -370,8 +370,22 @@ function ensureSeedUsers() {
   }
 }
 
+app.get('/', (_req, res) => {
+  res.json({
+    ok: true,
+    message: 'LevelUP API is running',
+    timestamp: new Date().toISOString(),
+    endpoints: ['/api/health', '/api/auth/login', '/api/auth/register', '/api/site-stats']
+  })
+})
+
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true })
+  res.json({
+    ok: true,
+    status: 'healthy',
+    service: 'levelup-backend',
+    timestamp: new Date().toISOString()
+  })
 })
 
 app.post('/api/auth/register', (req, res) => {
