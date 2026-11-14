@@ -1131,7 +1131,7 @@ function AppShell() {
           <Route path="/courses/:courseId/lessons/:lessonId" element={<LessonPage t={t} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} isLoggedIn={isLoggedIn} onCompleteLesson={completeLessonForCurrentUser} />} />
           <Route path="/courses/:courseId" element={<CourseDetailPage t={t} completedLessons={user ? currentUserLessons : completedLessons} onCourseComplete={awardCourseCompletion} subscription={currentUserSubscription} isLoggedIn={isLoggedIn} />} />
           <Route path="/courses" element={<CourseCatalogPage t={t} favorites={favorites} onToggleFavorite={setFavorites} />} />
-          <Route path="/auth" element={<AuthPage t={t} isLoggedIn={isLoggedIn} setIsLoggedIn={setIsLoggedIn} setUser={setUser} setAuthToken={setAuthToken} onUserRegistered={refreshSiteStats} />} />
+          <Route path="/auth" element={<AuthPage t={t} user={user} isLoggedIn={isLoggedIn} setIsLoggedIn={setIsLoggedIn} setUser={setUser} setAuthToken={setAuthToken} onUserRegistered={refreshSiteStats} />} />
           <Route path="/dashboard" element={<ProtectedRoute isLoggedIn={isLoggedIn}><DashboardPage t={t} user={user} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} onUpdateProfile={updateUserProfile} onChangePassword={changeUserPassword} reviews={reviews} language={language} setLanguage={setLanguage} theme={theme} setTheme={setTheme} onLogout={handleLogout} /></ProtectedRoute>} />
           <Route path="/dashboard/courses" element={<ProtectedRoute isLoggedIn={isLoggedIn}><CourseCatalogPage t={t} favorites={favorites} onToggleFavorite={setFavorites} /></ProtectedRoute>} />
           <Route path="/dashboard/my-lessons" element={<ProtectedRoute isLoggedIn={isLoggedIn}><DashboardLessonsPage completedLessons={user ? currentUserLessons : completedLessons} language={language} /></ProtectedRoute>} />
@@ -1781,7 +1781,7 @@ function LessonPage({ t, completedLessons, subscription: _subscription, isLogged
   )
 }
 
-function AuthPage({ t, isLoggedIn, setIsLoggedIn, setUser, setAuthToken, onUserRegistered }: { t: (typeof translations)[Lang]; isLoggedIn: boolean; setIsLoggedIn: React.Dispatch<React.SetStateAction<boolean>>; setUser: React.Dispatch<React.SetStateAction<UserProfile | null>>; setAuthToken: React.Dispatch<React.SetStateAction<string>>; onUserRegistered?: () => Promise<void> | void }) {
+function AuthPage({ t, user, isLoggedIn, setIsLoggedIn, setUser, setAuthToken, onUserRegistered }: { t: (typeof translations)[Lang]; user: UserProfile | null; isLoggedIn: boolean; setIsLoggedIn: React.Dispatch<React.SetStateAction<boolean>>; setUser: React.Dispatch<React.SetStateAction<UserProfile | null>>; setAuthToken: React.Dispatch<React.SetStateAction<string>>; onUserRegistered?: () => Promise<void> | void }) {
   const navigate = useNavigate()
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [showPassword, setShowPassword] = useState(false)
@@ -1791,8 +1791,10 @@ function AuthPage({ t, isLoggedIn, setIsLoggedIn, setUser, setAuthToken, onUserR
   const [form, setForm] = useState({ name: '', email: defaultUser.email, password: defaultUser.password, confirm: '' })
 
   useEffect(() => {
-    if (isLoggedIn) navigate('/dashboard')
-  }, [isLoggedIn, navigate])
+    if (!isLoggedIn) return
+    const targetPath = user && (isAdminRole(user.role) || user.email === adminUser.email) ? '/admin' : '/dashboard'
+    navigate(targetPath)
+  }, [isLoggedIn, navigate, user])
 
   const updateForm = (field: keyof typeof form, value: string) => {
     setForm((current) => ({ ...current, [field]: value }))

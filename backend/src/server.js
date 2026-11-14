@@ -310,6 +310,39 @@ function getPublicUserRecord(profile) {
   }
 }
 
+async function sendTelegramRegistrationNotice({ name, email }) {
+  const botToken = String(config.telegram?.botToken ?? '').trim()
+  const chatId = String(config.telegram?.chatId ?? '').trim()
+
+  if (!botToken || !chatId) {
+    return false
+  }
+
+  const text = [
+    '🆕 Новый пользователь зарегистрировался',
+    `Имя: ${name || 'Не указано'}`,
+    `Email: ${email}`,
+    `Время: ${new Date().toLocaleString('ru-RU')}`
+  ].join('\n')
+
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true
+    })
+  })
+
+  if (!response.ok) {
+    const payload = await response.text().catch(() => '')
+    throw new Error(`Telegram request failed (${response.status}): ${payload}`)
+  }
+
+  return true
+}
+
 function ensureSeedUsers() {
   const seedUsers = [
     { email: 'aisha@levelup.kg', firstName: 'Aisha', lastName: '', password: 'demo123', role: 'User' },
@@ -386,6 +419,7 @@ app.post('/api/auth/register', (req, res) => {
 
   const profile = getUserProfileStmt.get(email)
   const session = createUserSession(email, req.headers['user-agent'] ?? '')
+  const displayName = `${profile.first_name} ${profile.last_name}`.trim() || email
 
   res.status(201).json({
     ok: true,
@@ -393,7 +427,7 @@ app.post('/api/auth/register', (req, res) => {
     expiresAt: session.expiresAt,
     user: {
       email: profile.user_email,
-      name: `${profile.first_name} ${profile.last_name}`.trim() || email,
+      name: displayName,
       firstName: profile.first_name,
       lastName: profile.last_name,
       phone: '',
@@ -404,6 +438,13 @@ app.post('/api/auth/register', (req, res) => {
       accountStatus: profile.account_status,
       isBlocked: Boolean(profile.is_blocked)
     }
+  })
+
+  void sendTelegramRegistrationNotice({
+    name: displayName,
+    email: profile.user_email
+  }).catch((error) => {
+    console.error('Failed to send Telegram registration notification:', error)
   })
 })
 

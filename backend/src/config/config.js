@@ -12,6 +12,10 @@ export const config = {
   frontendUrl: process.env.FRONTEND_URL ?? 'http://localhost:5173',
   backendPublicUrl: process.env.BACKEND_PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:8787',
   databasePath: process.env.DATABASE_PATH ?? './levelup.sqlite',
+  telegram: {
+    botToken: String(process.env.TELEGRAM_BOT_TOKEN ?? '').trim(),
+    chatId: String(process.env.TELEGRAM_CHAT_ID ?? '').trim()
+  },
   payment: {
     provider: process.env.PAYMENT_PROVIDER ?? 'generic',
     apiBaseUrl: process.env.PAYMENT_API_BASE_URL ?? '',
