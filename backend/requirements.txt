@@ -1,0 +1,4 @@
+# This repository uses Node.js (frontend/backend).
+# File added by request.
+gunicorn>=20.1.0
+Django>=4.0,<5.0

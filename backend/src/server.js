@@ -2,10 +2,10 @@ import bcrypt from 'bcrypt'
 import cors from 'cors'
 import crypto from 'node:crypto'
 import express from 'express'
-import { config } from './config.js'
-import { db } from './db.js'
-import { getPlan } from './plans.js'
-import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './provider.js'
+import { config } from './config/config.js'
+import { db } from './config/db.js'
+import { getPlan } from './config/plans.js'
+import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './config/provider.js'
 
 const app = express()
 

@@ -8,10 +8,10 @@ const toInt = (value, fallback) => {
 }
 
 export const config = {
-  port: toInt(process.env.BACKEND_PORT, 8787),
+  port: toInt(process.env.PORT ?? process.env.BACKEND_PORT, 8787),
   frontendUrl: process.env.FRONTEND_URL ?? 'http://localhost:5173',
-  backendPublicUrl: process.env.BACKEND_PUBLIC_URL ?? 'http://localhost:8787',
-  databasePath: process.env.DATABASE_PATH ?? './backend/levelup.sqlite',
+  backendPublicUrl: process.env.BACKEND_PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:8787',
+  databasePath: process.env.DATABASE_PATH ?? './levelup.sqlite',
   payment: {
     provider: process.env.PAYMENT_PROVIDER ?? 'generic',
     apiBaseUrl: process.env.PAYMENT_API_BASE_URL ?? '',

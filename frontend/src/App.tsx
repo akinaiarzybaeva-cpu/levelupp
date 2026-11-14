@@ -17,6 +17,7 @@ import {
   LayoutDashboard,
   LayoutGrid,
   Languages,
+  Lock,
   LogOut,
   Mail,
   MapPin,
@@ -805,7 +806,7 @@ function AppShell() {
 
   const isAdminUser = isAdminRole(user?.role) || user?.email === adminUser.email
   const navItems = [
-    { to: '/', label: t.nav.home },
+    { to: '/home', label: t.nav.home },
     { to: '/courses', label: t.nav.courses },
     { to: '/rating', label: t.nav.rating },
     { to: '/reviews', label: t.nav.reviews },
@@ -1022,7 +1023,7 @@ function AppShell() {
       {!isDashboardRoute && (
         <header className="site-header">
           <div className="container nav-wrap">
-            <Link className="brand" to="/" aria-label="LEVEL UP home">
+            <Link className="brand" to="/home" aria-label="LEVEL UP home">
               <img src={siteLogo} alt="LEVEL UP" className="brand-logo-image" />
             </Link>
 
@@ -1125,7 +1126,8 @@ function AppShell() {
 
       <main className="page-shell">
         <Routes>
-          <Route path="/" element={<HomePage t={t} reviews={reviews} leaderboard={leaderboard} siteStats={siteStats} />} />
+          <Route path="/" element={<Navigate to="/home" replace />} />
+          <Route path="/home" element={<HomePage t={t} reviews={reviews} leaderboard={leaderboard} siteStats={siteStats} />} />
           <Route path="/courses/:courseId/lessons/:lessonId" element={<LessonPage t={t} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} isLoggedIn={isLoggedIn} onCompleteLesson={completeLessonForCurrentUser} />} />
           <Route path="/courses/:courseId" element={<CourseDetailPage t={t} completedLessons={user ? currentUserLessons : completedLessons} onCourseComplete={awardCourseCompletion} subscription={currentUserSubscription} isLoggedIn={isLoggedIn} />} />
           <Route path="/courses" element={<CourseCatalogPage t={t} favorites={favorites} onToggleFavorite={setFavorites} />} />
@@ -1147,7 +1149,7 @@ function AppShell() {
           <Route path="/faq" element={<FaqPage t={t} />} />
           <Route path="/privacy" element={<LegalPage title={t.footer.privacy} kind="privacy" />} />
           <Route path="/terms" element={<LegalPage title={t.footer.terms} kind="terms" />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/home" replace />} />
         </Routes>
       </main>
 
@@ -1163,7 +1165,7 @@ function ProtectedRoute({ isLoggedIn, children }: { isLoggedIn: boolean; childre
 
 function ProtectedAdminRoute({ isLoggedIn, user, children }: { isLoggedIn: boolean; user: UserProfile | null; children: React.ReactNode }) {
   const isAdmin = Boolean(user && (isAdminRole(user.role) || user.email === adminUser.email))
-  if (!isLoggedIn || !isAdmin) return <Navigate to="/dashboard" replace />
+  if (!isLoggedIn || !isAdmin) return <Navigate to="/home" replace />
   return <>{children}</>
 }
 
@@ -1602,15 +1604,32 @@ function LessonPage({ t, completedLessons, subscription: _subscription, isLogged
 
   return (
     <div className="container section lesson-page">
-      <div className="page-top-actions">
+      <div className="lesson-topbar">
         <SmartBackButton fallback={`/courses/${course.id}`} label={language === 'ru' ? 'Назад к урокам' : language === 'kg' ? 'Сабактарга кайтуу' : 'Back to lessons'} />
-      </div>
-      <div className="lesson-header">
-        <div>
-          <span className="eyebrow">{course.title[language]}</span>
-          <h1>{lesson.title[language]}</h1>
-          <button type="button" className="btn btn-secondary small" onClick={() => navigate(`/courses/${course.id}`)}>{t.sections.previous}</button>
+        <div className="lesson-course-meta">
+          <span>{course.title[language]}</span>
+          <span className="dot-divider" />
+          <span>
+            {language === 'ru'
+             ? `Урок ${lessonIndex + 1} из ${course.lessons.length}`
+             : language === 'kg'
+               ? `Сабақ ${lessonIndex + 1} / ${course.lessons.length}`
+               : `Lesson ${lessonIndex + 1} of ${course.lessons.length}`}
+          </span>
         </div>
+      </div>
+
+      <div className="lesson-header">
+        <div className="lesson-header-copy">
+          <span className="eyebrow lesson-eyebrow">{course.title[language]}</span>
+          <h1>{lesson.title[language]}</h1>
+          <div className="lesson-header-meta">
+            <span>{lesson.type}</span>
+            <span className="dot-divider" />
+            <span>{lesson.duration}</span>
+          </div>
+        </div>
+
         <div className="lesson-progress">
           <small>{progress}%</small>
           <div className="progress-bar"><span style={{ width: `${progress}%` }} /></div>
@@ -1620,76 +1639,140 @@ function LessonPage({ t, completedLessons, subscription: _subscription, isLogged
       <div className="lesson-layout">
         <div className="lesson-main">
           <div className="video-box">
-            <div className="video-badge">{lesson.type}</div>
-            <div className="video-frame-wrap">
-              <iframe
-                key={lesson.videoUrl}
-                src={lesson.videoUrl}
-                title={lesson.title[language]}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                allowFullScreen
-                className="video-frame"
-                onError={() => console.error(`Video load error for ${lesson.id}`)}
-              />
+            <div className="video-header-row">
+             <span className="video-badge">{lesson.type}</span>
+             <span className="video-timer-badge">
+               {language === 'ru'
+                 ? `Просмотр ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec} сек`
+                 : language === 'kg'
+                   ? `Көрүү ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec} сек`
+                   : `Watch ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec}s`}
+             </span>
             </div>
+
+            <div className="video-frame-wrap">
+             <iframe
+               key={lesson.videoUrl}
+               src={lesson.videoUrl}
+               title={lesson.title[language]}
+               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+               allowFullScreen
+               className="video-frame"
+               onError={() => console.error(`Video load error for ${lesson.id}`)}
+             />
+            </div>
+
             {!isCompleted && (
-              <div className="lesson-watch-controls">
-                <small>
-                  {language === 'ru'
-                    ? `Просмотр: ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec} сек`
-                    : language === 'kg'
-                      ? `Көрүү: ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec} сек`
-                      : `Watch time: ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec} sec`}
-                </small>
-                <button
-                  type="button"
-                  className="btn btn-primary small"
-                  disabled={!watchReady}
-                  onClick={() => onCompleteLesson?.(course.id, lesson.id)}
-                >
-                  {language === 'ru' ? 'Завершить урок' : language === 'kg' ? 'Сабакты аяктоо' : 'Mark lesson complete'}
-                </button>
-              </div>
+             <div className="lesson-watch-controls">
+               <small>
+                 {language === 'ru'
+                   ? `Просмотр: ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec} сек`
+                   : language === 'kg'
+                     ? `Көрүү: ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec} сек`
+                     : `Watch time: ${Math.min(watchElapsedSec, watchRequirementSec)} / ${watchRequirementSec} sec`}
+               </small>
+               <button
+                 type="button"
+                 className="btn btn-primary small"
+                 disabled={!watchReady}
+                 onClick={() => onCompleteLesson?.(course.id, lesson.id)}
+               >
+                 {language === 'ru' ? 'Завершить урок' : language === 'kg' ? 'Сабакты аяктоо' : 'Mark lesson complete'}
+               </button>
+             </div>
             )}
           </div>
         </div>
 
         <aside className="lesson-sidebar">
           <div className="detail-card sidebar-box">
-            <h3>{t.sections.lessonNav}</h3>
+            <div className="sidebar-box-header">
+             <h3>{language === 'ru' ? 'Содержание курса' : language === 'kg' ? 'Курс мазмуну' : 'Course content'}</h3>
+             <span>{course.lessons.length} {language === 'ru' ? 'уроков' : language === 'kg' ? 'сабақ' : 'lessons'}</span>
+            </div>
+
             <div className="nav-buttons">
-              {previousLesson && <button type="button" className="btn btn-secondary" onClick={() => navigate(`/courses/${course.id}/lessons/${previousLesson.id}`)}>{t.sections.previous}</button>}
-              {nextLesson ? (
-               <button type="button" className="btn btn-primary" onClick={() => {
-                 if (!completedLessons.includes(lesson.id)) {
-                   return
-                 }
-                 navigate(`/courses/${course.id}/lessons/${nextLesson.id}`)
-               }} disabled={!completedLessons.includes(lesson.id)}>{t.buttons.nextLesson}</button>
+             {previousLesson && (
+               <button type="button" className="btn btn-secondary small" onClick={() => navigate(`/courses/${course.id}/lessons/${previousLesson.id}`)}>
+                 {t.sections.previous}
+               </button>
+             )}
+
+             {nextLesson ? (
+               <>
+                 <button
+                   type="button"
+                   className="btn btn-primary small"
+                   onClick={() => {
+                     if (!completedLessons.includes(lesson.id)) {
+                       return
+                     }
+                     navigate(`/courses/${course.id}/lessons/${nextLesson.id}`)
+                   }}
+                   disabled={!completedLessons.includes(lesson.id)}
+                 >
+                   {t.buttons.nextLesson}
+                 </button>
+                 {!completedLessons.includes(lesson.id) && (
+                   <p className="lesson-nav-note">
+                     {language === 'ru'
+                       ? 'Досмотрите видео, чтобы разблокировать следующий урок.'
+                       : language === 'kg'
+                         ? 'Келесі сабаққа өту үшін видеоны аяқтаңыз.'
+                         : 'Finish the video to unlock the next lesson.'}
+                   </p>
+                 )}
+               </>
              ) : (
-               <button type="button" className="btn btn-primary" onClick={() => navigate('/dashboard')}>{t.sections.done}</button>
+               <button type="button" className="btn btn-primary small" onClick={() => navigate('/dashboard')}>{t.sections.done}</button>
              )}
             </div>
           </div>
-          <div className="detail-card sidebar-box">
-            <h3>{t.generic.lessons}</h3>
+
+          <div className="detail-card sidebar-box lesson-content-box">
+            <div className="sidebar-box-header compact-header">
+             <h3>{t.generic.lessons}</h3>
+            </div>
             <div className="sidebar-list">
-               {course.lessons.map((item, index) => (
-               <button type="button" key={item.id} className={item.id === lesson.id ? 'sidebar-item active' : 'sidebar-item'} onClick={() => {
-                 if (!isLoggedIn && index >= 1) {
-                   navigate('/auth')
-                   return
-                 }
-                 const previousLessonId = course.lessons[index - 1]?.id
-                 if (index > 0 && previousLessonId && !completedLessons.includes(previousLessonId)) {
-                   return
-                 }
-                 navigate(`/courses/${course.id}/lessons/${item.id}`)
-               }} disabled={index > 0 && !completedLessons.includes(course.lessons[index - 1]?.id ?? '')}>
-                 <span>{index + 1}</span>
-                 <small>{item.title[language]}</small>
-               </button>
-             ))}
+             {course.lessons.map((item, index) => {
+               const isCurrent = item.id === lesson.id
+               const isDone = completedLessons.includes(item.id)
+               const isLocked = index > 0 && !completedLessons.includes(course.lessons[index - 1]?.id ?? '')
+
+               return (
+                 <button
+                   type="button"
+                   key={item.id}
+                   className={[
+                     'sidebar-item',
+                     isCurrent ? 'active' : '',
+                     isDone ? 'done' : '',
+                     isLocked ? 'locked' : ''
+                   ].filter(Boolean).join(' ')}
+                   onClick={() => {
+                     if (!isLoggedIn && index >= 1) {
+                       navigate('/auth')
+                       return
+                     }
+                     const previousLessonId = course.lessons[index - 1]?.id
+                     if (index > 0 && previousLessonId && !completedLessons.includes(previousLessonId)) {
+                       return
+                     }
+                     navigate(`/courses/${course.id}/lessons/${item.id}`)
+                   }}
+                   disabled={index > 0 && !completedLessons.includes(course.lessons[index - 1]?.id ?? '')}
+                 >
+                   <span className="sidebar-index">{index + 1}</span>
+                   <div className="sidebar-item-copy">
+                     <strong>{item.title[language]}</strong>
+                     <small>{item.duration}</small>
+                   </div>
+                   <span className="sidebar-state">
+                     {isLocked ? <Lock size={14} /> : isDone ? <Check size={14} /> : isCurrent ? <span className="live-dot" /> : null}
+                   </span>
+                 </button>
+               )
+             })}
             </div>
           </div>
         </aside>
@@ -1996,7 +2079,7 @@ function DashboardPage({ t, user, completedLessons, subscription, onUpdateProfil
           </div>
 
           <div className="dashboard-topbar-actions">
-            <Link to="/" className="dashboard-home-link">
+            <Link to="/home" className="dashboard-home-link">
               <Home size={16} />
               <span>{t.nav.home}</span>
             </Link>
@@ -2441,7 +2524,7 @@ function ProfilePage({ t, user, completedLessons: _completedLessons, subscriptio
             <label className="dashboard-search"><Search size={16} /><input value={user?.name ?? 'Student'} readOnly placeholder={t.auth.name} /></label>
           </div>
           <div className="dashboard-topbar-actions">
-            <Link to="/" className="dashboard-home-link">
+            <Link to="/home" className="dashboard-home-link">
               <Home size={16} />
               <span>{t.nav.home}</span>
             </Link>
