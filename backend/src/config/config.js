@@ -11,7 +11,9 @@ export const config = {
   port: toInt(process.env.PORT ?? process.env.BACKEND_PORT, 8787),
   frontendUrl: process.env.FRONTEND_URL ?? 'http://localhost:5173',
   backendPublicUrl: process.env.BACKEND_PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:8787',
+  databaseUrl: String(process.env.DATABASE_URL ?? '').trim(),
   databasePath: process.env.DATABASE_PATH ?? './levelup.sqlite',
+  databaseDriver: process.env.DATABASE_URL ? 'postgres' : 'sqlite',
   telegram: {
     botToken: String(process.env.TELEGRAM_BOT_TOKEN ?? '').trim(),
     chatId: String(process.env.TELEGRAM_CHAT_ID ?? '').trim()
