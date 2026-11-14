@@ -7,10 +7,23 @@ const toInt = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+const normalizeOrigin = (value, fallback) => {
+  const raw = String(value ?? '').trim()
+  if (!raw) return fallback
+
+  const withoutTrailingSlash = raw.replace(/\/+$/, '')
+  try {
+    const url = new URL(withoutTrailingSlash.includes('://') ? withoutTrailingSlash : `https://${withoutTrailingSlash}`)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return withoutTrailingSlash
+  }
+}
+
 export const config = {
   port: toInt(process.env.PORT ?? process.env.BACKEND_PORT, 8787),
-  frontendUrl: process.env.FRONTEND_URL ?? 'http://localhost:5173',
-  backendPublicUrl: process.env.BACKEND_PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:8787',
+  frontendUrl: normalizeOrigin(process.env.FRONTEND_URL ?? 'http://localhost:5173', 'http://localhost:5173'),
+  backendPublicUrl: normalizeOrigin(process.env.BACKEND_PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:8787', 'http://localhost:8787'),
   databaseUrl: String(process.env.DATABASE_URL ?? '').trim(),
   databasePath: process.env.DATABASE_PATH ?? './levelup.sqlite',
   databaseDriver: process.env.DATABASE_URL ? 'postgres' : 'sqlite',

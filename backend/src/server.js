@@ -9,15 +9,36 @@ import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } 
 
 const app = express()
 
-const allowedOrigins = new Set([config.frontendUrl, 'http://127.0.0.1:5173', 'http://localhost:5173'])
+const allowedOrigins = new Set([
+  config.frontendUrl,
+  'http://127.0.0.1:5173',
+  'http://localhost:5173',
+  'http://localhost:4173',
+  'http://127.0.0.1:4173',
+  'https://levellupp.netlify.app',
+  'https://www.levellupp.netlify.app',
+  'https://localhost:5173',
+  'https://127.0.0.1:5173'
+])
+
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.has(origin)) {
       callback(null, true)
       return
     }
+
+    const normalizedOrigin = origin.replace(/\/+$/, '')
+    if (allowedOrigins.has(normalizedOrigin)) {
+      callback(null, true)
+      return
+    }
+
     callback(new Error('Origin is not allowed by CORS'))
-  }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Email', 'X-User-Role', 'X-Signature', 'X-Payment-Signature']
 }))
 app.use(express.json({
   verify: (req, _res, buf) => {
