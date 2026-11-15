@@ -482,6 +482,30 @@ app.post('/api/auth/register', (req, res) => {
   })
 })
 
+app.get('/api/auth/account-status', (req, res) => {
+  const email = String(req.query?.email ?? '').trim().toLowerCase()
+  if (!email) {
+    res.status(400).json({ error: 'Email is required' })
+    return
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({ error: 'Email is invalid' })
+    return
+  }
+
+  const profile = getUserProfileStmt.get(email)
+  if (!profile) {
+    res.json({ exists: false, blocked: false })
+    return
+  }
+
+  res.json({
+    exists: true,
+    blocked: profile.account_status === 'blocked' || Boolean(profile.is_blocked)
+  })
+})
+
 app.post('/api/auth/login', (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase()
   const password = String(req.body?.password ?? '')
