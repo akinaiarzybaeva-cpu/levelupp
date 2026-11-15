@@ -773,7 +773,11 @@ function AppShell() {
         setIsLoggedIn(true)
       } catch (error) {
         if (!active) return
-        console.error('Session restore failed:', error)
+        const message = error instanceof Error ? error.message : String(error)
+        const isExpectedAuthFailure = /401|403|Session expired|invalid|unauthorized/i.test(message)
+        if (!isExpectedAuthFailure) {
+          console.error('Session restore failed:', error)
+        }
         setIsLoggedIn(false)
         setUser(null)
         if (typeof window !== 'undefined') window.localStorage.removeItem('levelup-auth-token')
@@ -1265,8 +1269,44 @@ function ProtectedRoute({ isLoggedIn, children }: { isLoggedIn: boolean; childre
 }
 
 function ProtectedAdminRoute({ isLoggedIn, user, children }: { isLoggedIn: boolean; user: UserProfile | null; children: React.ReactNode }) {
+  const language = getCurrentLanguage()
   const isAdmin = Boolean(user && (isAdminRole(user.role) || user.email === adminUser.email))
-  if (!isLoggedIn || !isAdmin) return <Navigate to="/home" replace />
+
+  if (!isLoggedIn) {
+    return <Navigate to={`/auth?mode=login&next=${encodeURIComponent('/admin')}`} replace />
+  }
+
+  if (!isAdmin) {
+    const title = language === 'kg' ? 'Кирүүге уруксат жок' : language === 'ru' ? 'Доступ запрещён' : 'Access denied'
+    const subtitle = language === 'kg' ? 'Бул бет колдонуучунун администратор ролуна гана арналган.' : language === 'ru' ? 'Эта страница доступна только администраторам.' : 'This page is available only to administrators.'
+    const primaryLabel = language === 'kg' ? 'Башкы бетке' : language === 'ru' ? 'На главную' : 'Back to home'
+    const secondaryLabel = language === 'kg' ? 'Личный кабинет' : language === 'ru' ? 'Личный кабинет' : 'Dashboard'
+
+    return (
+      <div className="auth-shell">
+        <div className="page-top-actions auth-top-actions">
+          <SmartBackButton fallback="/home" label={language === 'ru' ? 'Назад' : language === 'kg' ? 'Кайтуу' : 'Back'} />
+        </div>
+
+        <div className="auth-card auth-access-card">
+          <div className="auth-card-header">
+            <div className="auth-logo-wrap">
+              <div className="logo-mark">L</div>
+            </div>
+            <h2>{title}</h2>
+          </div>
+
+          <p className="auth-subtitle">{subtitle}</p>
+
+          <div className="auth-actions stacked-actions">
+            <Link to="/home" className="btn btn-primary full-width">{primaryLabel}</Link>
+            <Link to="/dashboard" className="btn btn-secondary full-width">{secondaryLabel}</Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return <>{children}</>
 }
 
@@ -1279,12 +1319,16 @@ function StartLearningRedirect() {
     let active = true
 
     const resolveStartFlow = async () => {
-      try {
-        await fetchJson<{ ok: true; user: { email: string } }>(`${API_BASE_URL}/api/auth/session`)
-        if (active) navigate(nextPath, { replace: true })
-        return
-      } catch {
-        // No active session, continue auth flow selection.
+      const token = getStoredAuthToken()
+
+      if (token) {
+        try {
+          await fetchJson<{ ok: true; user: { email: string } }>(`${API_BASE_URL}/api/auth/session`)
+          if (active) navigate(nextPath, { replace: true })
+          return
+        } catch {
+          // No active session, continue auth flow selection.
+        }
       }
 
       const lastAuthEmail = getStoredLastAuthEmail()
