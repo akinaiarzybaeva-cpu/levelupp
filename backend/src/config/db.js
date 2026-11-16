@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3'
 import { config } from './config.js'
+import { seedCoursesAndLessonsIfEmpty } from './seedCourses.js'
 
 export const db = new Database(config.databasePath)
 
@@ -104,6 +105,7 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_email ON user_sessions (user_email);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions (expires_at);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_token_hash ON user_sessions (token_hash);
 
 CREATE TABLE IF NOT EXISTS course_progress (
   user_email TEXT NOT NULL,
@@ -116,6 +118,81 @@ CREATE TABLE IF NOT EXISTS course_progress (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (user_email, course_id)
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id TEXT PRIMARY KEY,
+  user_email TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at TEXT NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_email ON password_reset_tokens (user_email);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at ON password_reset_tokens (expires_at);
+
+CREATE TABLE IF NOT EXISTS admin_rate_limits (
+  key TEXT PRIMARY KEY,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  reset_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS courses (
+  id TEXT PRIMARY KEY,
+  badge TEXT NOT NULL DEFAULT 'Web',
+  title_kg TEXT NOT NULL,
+  title_ru TEXT NOT NULL,
+  title_en TEXT NOT NULL,
+  description_kg TEXT NOT NULL DEFAULT '',
+  description_ru TEXT NOT NULL DEFAULT '',
+  description_en TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'Frontend',
+  level TEXT NOT NULL DEFAULT 'Beginner',
+  rating REAL NOT NULL DEFAULT 4.9,
+  students TEXT NOT NULL DEFAULT '1.2K',
+  duration TEXT NOT NULL DEFAULT '4 недели',
+  lessons_count INTEGER NOT NULL DEFAULT 0,
+  color TEXT NOT NULL DEFAULT '#ffefeb',
+  accent TEXT NOT NULL DEFAULT '#f97316',
+  tags TEXT NOT NULL DEFAULT '[]',
+  outline TEXT NOT NULL DEFAULT '[]',
+  is_published INTEGER NOT NULL DEFAULT 1,
+  order_index INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_courses_published ON courses (is_published);
+CREATE INDEX IF NOT EXISTS idx_courses_order ON courses (order_index);
+
+CREATE TABLE IF NOT EXISTS lessons (
+  id TEXT PRIMARY KEY,
+  course_id TEXT NOT NULL,
+  title_kg TEXT NOT NULL,
+  title_ru TEXT NOT NULL,
+  title_en TEXT NOT NULL,
+  duration TEXT NOT NULL DEFAULT '30 мин',
+  type TEXT NOT NULL DEFAULT 'Видеоурок',
+  theory TEXT NOT NULL DEFAULT '',
+  code TEXT NOT NULL DEFAULT '',
+  task TEXT NOT NULL DEFAULT '',
+  video_url TEXT NOT NULL DEFAULT '',
+  quiz_json TEXT NOT NULL DEFAULT '{}',
+  order_index INTEGER NOT NULL DEFAULT 1,
+  is_published INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lessons_course_id ON lessons (course_id);
+CREATE INDEX IF NOT EXISTS idx_lessons_order ON lessons (course_id, order_index);
+
+CREATE TABLE IF NOT EXISTS system_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON reviews (created_at DESC);
@@ -139,3 +216,13 @@ const reviewColumns = new Set(db.prepare('PRAGMA table_info(reviews)').all().map
 if (!reviewColumns.has('moderation_status')) {
   db.exec("ALTER TABLE reviews ADD COLUMN moderation_status TEXT NOT NULL DEFAULT 'published'")
 }
+
+// Seed default system settings
+const nowIso = new Date().toISOString()
+db.prepare(`
+  INSERT OR IGNORE INTO system_settings (key, value, updated_at)
+  VALUES ('ai_pro_enabled', 'true', ?)
+`).run(nowIso)
+
+// Seed default courses and lessons if table is empty
+seedCoursesAndLessonsIfEmpty(db)

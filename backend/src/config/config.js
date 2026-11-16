@@ -27,9 +27,20 @@ export const config = {
   databaseUrl: String(process.env.DATABASE_URL ?? '').trim(),
   databasePath: process.env.DATABASE_PATH ?? './levelup.sqlite',
   databaseDriver: process.env.DATABASE_URL ? 'postgres' : 'sqlite',
+  // Admin account — email is the unique admin identifier
+  adminEmail: String(process.env.ADMIN_EMAIL ?? 'admin@levelup.kg').trim().toLowerCase(),
+  // Initial admin password used ONLY when no admin exists yet (first-time setup)
+  adminInitialPassword: String(process.env.ADMIN_INITIAL_PASSWORD ?? '').trim(),
   telegram: {
     botToken: String(process.env.TELEGRAM_BOT_TOKEN ?? '').trim(),
     chatId: String(process.env.TELEGRAM_CHAT_ID ?? '').trim()
+  },
+  email: {
+    host: String(process.env.EMAIL_HOST ?? '').trim(),
+    port: toInt(process.env.EMAIL_PORT, 587),
+    user: String(process.env.EMAIL_USER ?? '').trim(),
+    pass: String(process.env.EMAIL_PASS ?? '').trim(),
+    from: String(process.env.EMAIL_FROM ?? '').trim()
   },
   payment: {
     provider: process.env.PAYMENT_PROVIDER ?? 'generic',

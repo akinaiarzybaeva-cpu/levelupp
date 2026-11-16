@@ -30,7 +30,6 @@ import {
   Search,
   SendHorizonal,
   Settings,
-  ShieldCheck,
   Sparkles,
   Sun,
   Target,
@@ -60,6 +59,10 @@ import {
   type SubscriptionPlanId,
   type UserSubscription
 } from './subscriptionService'
+import AdminPanel from './components/AdminPanel'
+import AdminLogin from './components/AdminLogin'
+import AdminResetPassword from './components/AdminResetPassword'
+import './components/AdminPanel.css'
 
 type Lang = 'kg' | 'ru' | 'en'
 type Theme = 'light' | 'dark'
@@ -675,6 +678,19 @@ function AppShell() {
   }, [])
 
   useEffect(() => {
+    fetch(API_BASE_URL + '/api/courses')
+      .then((res) => res.json())
+      .then((data: { courses?: Course[] }) => {
+        if (Array.isArray(data.courses) && data.courses.length > 0) {
+          for (const item of data.courses) {
+            courseIndex[item.id] = item
+          }
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
     setMobileOpen(false)
   }, [location.pathname])
 
@@ -1053,25 +1069,32 @@ function AppShell() {
     return { ok: true as const, message: 'Профиль сохранён' }
   }
 
-  const changeUserPassword = (currentPassword: string, nextPassword: string, confirmPassword: string) => {
-    if (!user?.email) return { ok: false as const, message: 'Auth required' }
-    if (!currentPassword || !nextPassword || !confirmPassword) return { ok: false as const, message: 'Заполните все поля пароля' }
-    if (nextPassword.length < 6) return { ok: false as const, message: 'Минимум 6 символов' }
-    if (nextPassword !== confirmPassword) return { ok: false as const, message: 'Новые пароли не совпадают' }
-    if (currentPassword === nextPassword) return { ok: false as const, message: 'Новый пароль должен отличаться от текущего' }
+  const changeUserPassword = async (currentPassword: string, nextPassword: string, confirmPassword: string): Promise<{ ok: boolean; message: string }> => {
+    if (!user?.email) return { ok: false, message: 'Auth required' }
+    if (!currentPassword || !nextPassword || !confirmPassword) return { ok: false, message: 'Заполните все поля пароля' }
+    if (nextPassword.length < 8) return { ok: false, message: 'Минимум 8 символов' }
+    if (nextPassword !== confirmPassword) return { ok: false, message: 'Новые пароли не совпадают' }
+    if (currentPassword === nextPassword) return { ok: false, message: 'Новый пароль должен отличаться от текущего' }
 
-    void fetchJson<{ ok: true }>(`${API_BASE_URL}/api/users/${encodeURIComponent(user.email)}/password`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'x-user-email': user.email },
-      body: JSON.stringify({ currentPassword, newPassword: nextPassword, confirmPassword })
-    }).then(() => {
-      return { ok: true as const, message: 'Пароль успешно изменён' }
-    }).catch((error) => {
+    try {
+      const result = await fetchJson<{ ok: true; sessionsRevoked?: boolean }>(`${API_BASE_URL}/api/users/${encodeURIComponent(user.email)}/password`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'x-user-email': user.email },
+        body: JSON.stringify({ currentPassword, newPassword: nextPassword, confirmPassword })
+      })
+
+      if (result.sessionsRevoked) {
+        // Force logout since all sessions were revoked
+        setTimeout(() => {
+          void handleLogout()
+        }, 1500)
+      }
+
+      return { ok: true, message: 'Пароль успешно изменён. Выполняется выход...' }
+    } catch (error) {
       const message = error instanceof Error ? error.message : 'Пароль не удалось изменить'
-      return { ok: false as const, message }
-    })
-
-    return { ok: true as const, message: 'Пароль успешно изменён' }
+      return { ok: false, message }
+    }
   }
 
   const updateUserNotifications = (nextSettings: NotificationSettings) => {
@@ -1237,7 +1260,7 @@ function AppShell() {
           <Route path="/courses/:courseId" element={<CourseDetailPage t={t} completedLessons={user ? currentUserLessons : completedLessons} onCourseComplete={awardCourseCompletion} subscription={currentUserSubscription} isLoggedIn={isLoggedIn} />} />
           <Route path="/courses" element={<CourseCatalogPage t={t} favorites={favorites} onToggleFavorite={setFavorites} />} />
           <Route path="/auth" element={<AuthPage t={t} user={user} isLoggedIn={isLoggedIn} setIsLoggedIn={setIsLoggedIn} setUser={setUser} setAuthToken={setAuthToken} onUserRegistered={refreshSiteStats} />} />
-          <Route path="/dashboard" element={<ProtectedRoute isLoggedIn={isLoggedIn}><DashboardPage t={t} user={user} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} onUpdateProfile={updateUserProfile} onChangePassword={changeUserPassword} reviews={reviews} language={language} setLanguage={setLanguage} theme={theme} setTheme={setTheme} onLogout={handleLogout} /></ProtectedRoute>} />
+          <Route path="/dashboard" element={<ProtectedRoute isLoggedIn={isLoggedIn}><DashboardPage t={t} user={user} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} onUpdateProfile={updateUserProfile} onChangePassword={(cur, next, conf) => { void changeUserPassword(cur, next, conf) }} reviews={reviews} language={language} setLanguage={setLanguage} theme={theme} setTheme={setTheme} onLogout={handleLogout} /></ProtectedRoute>} />
           <Route path="/dashboard/courses" element={<ProtectedRoute isLoggedIn={isLoggedIn}><CourseCatalogPage t={t} favorites={favorites} onToggleFavorite={setFavorites} /></ProtectedRoute>} />
           <Route path="/dashboard/my-lessons" element={<ProtectedRoute isLoggedIn={isLoggedIn}><DashboardLessonsPage completedLessons={user ? currentUserLessons : completedLessons} language={language} /></ProtectedRoute>} />
           <Route path="/dashboard/rating" element={<ProtectedRoute isLoggedIn={isLoggedIn}><RatingPage t={t} leaderboard={leaderboard} reviews={reviews} /></ProtectedRoute>} />
@@ -1245,8 +1268,30 @@ function AppShell() {
           <Route path="/dashboard/pricing" element={<ProtectedRoute isLoggedIn={isLoggedIn}><PricingPage t={t} /></ProtectedRoute>} />
           <Route path="/dashboard/faq" element={<ProtectedRoute isLoggedIn={isLoggedIn}><FaqPage t={t} /></ProtectedRoute>} />
           <Route path="/dashboard/ai" element={<ProtectedRoute isLoggedIn={isLoggedIn}><DashboardAiPage language={language} subscription={currentUserSubscription} userEmail={user?.email} /></ProtectedRoute>} />
-          <Route path="/dashboard/profile" element={<ProtectedRoute isLoggedIn={isLoggedIn}><ProfilePage t={t} user={user} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} onUpdateProfile={updateUserProfile} onChangePassword={changeUserPassword} onUpdateNotifications={updateUserNotifications} notifications={notifications} reviews={reviews} language={language} setLanguage={setLanguage} theme={theme} setTheme={setTheme} onLogout={handleLogout} /></ProtectedRoute>} />
-          <Route path="/admin" element={<ProtectedAdminRoute isLoggedIn={isLoggedIn} user={user}><AdminPage t={t} user={user} /></ProtectedAdminRoute>} />
+          <Route path="/dashboard/profile" element={<ProtectedRoute isLoggedIn={isLoggedIn}><ProfilePage t={t} user={user} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} onUpdateProfile={updateUserProfile} onChangePassword={(cur, next, conf) => changeUserPassword(cur, next, conf)} onUpdateNotifications={updateUserNotifications} notifications={notifications} reviews={reviews} language={language} setLanguage={setLanguage} theme={theme} setTheme={setTheme} onLogout={handleLogout} /></ProtectedRoute>} />
+          {/* Admin routes — dedicated login and panel */}
+          <Route path="/admin/login" element={<AdminLogin isLoggedIn={isLoggedIn} userRole={user?.role} onLogin={(token, adminUser) => {
+            setAuthToken(token)
+            if (typeof window !== 'undefined') window.localStorage.setItem('levelup-auth-token', token)
+            const nextUser: UserProfile = {
+              name: adminUser.name,
+              email: adminUser.email,
+              password: '',
+              avatar: adminUser.avatar,
+              role: adminUser.role,
+              firstName: adminUser.firstName ?? '',
+              lastName: adminUser.lastName ?? ''
+            }
+            setUser(nextUser)
+            setIsLoggedIn(true)
+            if (typeof window !== 'undefined') window.localStorage.setItem('levelup-user', JSON.stringify(nextUser))
+          }} />} />
+          <Route path="/admin/reset-password" element={<AdminResetPassword />} />
+          <Route path="/admin" element={
+            <ProtectedAdminRoute isLoggedIn={isLoggedIn} user={user}>
+              <AdminPanel user={user ? { name: user.name, email: user.email, avatar: user.avatar, role: user.role } : null} onLogout={handleLogout} />
+            </ProtectedAdminRoute>
+          } />
           <Route path="/rating" element={<RatingPage t={t} leaderboard={leaderboard} reviews={reviews} />} />
           <Route path="/reviews" element={<ReviewsPage t={t} reviews={reviews} setReviews={setReviews} isLoggedIn={isLoggedIn} user={user} onRefreshSiteStats={refreshSiteStats} />} />
           <Route path="/pricing" element={<PricingPage t={t} />} />
@@ -1269,42 +1314,10 @@ function ProtectedRoute({ isLoggedIn, children }: { isLoggedIn: boolean; childre
 }
 
 function ProtectedAdminRoute({ isLoggedIn, user, children }: { isLoggedIn: boolean; user: UserProfile | null; children: React.ReactNode }) {
-  const language = getCurrentLanguage()
   const isAdmin = Boolean(user && (isAdminRole(user.role) || user.email === adminUser.email))
 
-  if (!isLoggedIn) {
-    return <Navigate to={`/auth?mode=login&next=${encodeURIComponent('/admin')}`} replace />
-  }
-
-  if (!isAdmin) {
-    const title = language === 'kg' ? 'Кирүүге уруксат жок' : language === 'ru' ? 'Доступ запрещён' : 'Access denied'
-    const subtitle = language === 'kg' ? 'Бул бет колдонуучунун администратор ролуна гана арналган.' : language === 'ru' ? 'Эта страница доступна только администраторам.' : 'This page is available only to administrators.'
-    const primaryLabel = language === 'kg' ? 'Башкы бетке' : language === 'ru' ? 'На главную' : 'Back to home'
-    const secondaryLabel = language === 'kg' ? 'Личный кабинет' : language === 'ru' ? 'Личный кабинет' : 'Dashboard'
-
-    return (
-      <div className="auth-shell">
-        <div className="page-top-actions auth-top-actions">
-          <SmartBackButton fallback="/home" label={language === 'ru' ? 'Назад' : language === 'kg' ? 'Кайтуу' : 'Back'} />
-        </div>
-
-        <div className="auth-card auth-access-card">
-          <div className="auth-card-header">
-            <div className="auth-logo-wrap">
-              <div className="logo-mark">L</div>
-            </div>
-            <h2>{title}</h2>
-          </div>
-
-          <p className="auth-subtitle">{subtitle}</p>
-
-          <div className="auth-actions stacked-actions">
-            <Link to="/home" className="btn btn-primary full-width">{primaryLabel}</Link>
-            <Link to="/dashboard" className="btn btn-secondary full-width">{secondaryLabel}</Link>
-          </div>
-        </div>
-      </div>
-    )
+  if (!isLoggedIn || !isAdmin) {
+    return <Navigate to={'/admin/login?next=%2Fadmin'} replace />
   }
 
   return <>{children}</>
@@ -2239,7 +2252,7 @@ function AuthPage({ t, user, isLoggedIn, setIsLoggedIn, setUser, setAuthToken, o
   )
 }
 
-function DashboardPage({ t, user, completedLessons, subscription, onUpdateProfile: _onUpdateProfile, onChangePassword: _onChangePassword, reviews: _reviews, language, setLanguage, theme, setTheme, onLogout }: { t: (typeof translations)[Lang]; user: UserProfile | null; completedLessons: string[]; subscription?: UserSubscription; onUpdateProfile?: (profile: Partial<UserProfile>) => { ok: boolean; message: string }; onChangePassword?: (currentPassword: string, nextPassword: string, confirmPassword: string) => { ok: boolean; message: string }; reviews: Review[]; language: Lang; setLanguage: React.Dispatch<React.SetStateAction<Lang>>; theme: Theme; setTheme: React.Dispatch<React.SetStateAction<Theme>>; onLogout: () => void }) {
+function DashboardPage({ t, user, completedLessons, subscription, onUpdateProfile: _onUpdateProfile, onChangePassword: _onChangePassword, reviews: _reviews, language, setLanguage, theme, setTheme, onLogout }: { t: (typeof translations)[Lang]; user: UserProfile | null; completedLessons: string[]; subscription?: UserSubscription; onUpdateProfile?: (profile: Partial<UserProfile>) => { ok: boolean; message: string }; onChangePassword?: (currentPassword: string, nextPassword: string, confirmPassword: string) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string } | void; reviews: Review[]; language: Lang; setLanguage: React.Dispatch<React.SetStateAction<Lang>>; theme: Theme; setTheme: React.Dispatch<React.SetStateAction<Theme>>; onLogout: () => void }) {
   const navigate = useNavigate()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -2577,7 +2590,7 @@ function DashboardLessonsPage({ completedLessons, language }: { completedLessons
   )
 }
 
-function ProfilePage({ t, user, completedLessons: _completedLessons, subscription, onUpdateProfile, onChangePassword, onUpdateNotifications, notifications, reviews: _reviews, language, setLanguage, theme, setTheme, onLogout }: { t: (typeof translations)[Lang]; user: UserProfile | null; completedLessons: string[]; subscription?: UserSubscription; onUpdateProfile?: (profile: Partial<UserProfile>) => { ok: boolean; message: string }; onChangePassword?: (currentPassword: string, nextPassword: string, confirmPassword: string) => { ok: boolean; message: string }; onUpdateNotifications?: (settings: NotificationSettings) => { ok: boolean; message: string }; notifications: NotificationSettings; reviews: Review[]; language: Lang; setLanguage: React.Dispatch<React.SetStateAction<Lang>>; theme: Theme; setTheme: React.Dispatch<React.SetStateAction<Theme>>; onLogout: () => void }) {
+function ProfilePage({ t, user, completedLessons: _completedLessons, subscription, onUpdateProfile, onChangePassword, onUpdateNotifications, notifications, reviews: _reviews, language, setLanguage, theme, setTheme, onLogout }: { t: (typeof translations)[Lang]; user: UserProfile | null; completedLessons: string[]; subscription?: UserSubscription; onUpdateProfile?: (profile: Partial<UserProfile>) => { ok: boolean; message: string }; onChangePassword?: (currentPassword: string, nextPassword: string, confirmPassword: string) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string } | void; onUpdateNotifications?: (settings: NotificationSettings) => { ok: boolean; message: string }; notifications: NotificationSettings; reviews: Review[]; language: Lang; setLanguage: React.Dispatch<React.SetStateAction<Lang>>; theme: Theme; setTheme: React.Dispatch<React.SetStateAction<Theme>>; onLogout: () => void }) {
   const navigate = useNavigate()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -2941,9 +2954,9 @@ function ProfilePage({ t, user, completedLessons: _completedLessons, subscriptio
               <div className="profile-grid settings-main-grid">
                 <div className="profile-info-block security-panel">
                   <h3>{language === 'ru' ? 'Безопасность' : language === 'kg' ? 'Коопсуздук' : 'Security'}</h3>
-                  <form className="settings-form" onSubmit={(event) => {
+                  <form className="settings-form" onSubmit={async (event) => {
                     event.preventDefault()
-                    const result = onChangePassword?.(currentPassword, newPassword, confirmPassword)
+                    const result = await onChangePassword?.(currentPassword, newPassword, confirmPassword)
                     setPasswordNotice(result?.message ?? null)
                     if (result?.ok) {
                       setCurrentPassword('')
@@ -3062,377 +3075,6 @@ function ProfilePage({ t, user, completedLessons: _completedLessons, subscriptio
   )
 }
 
-type AdminOverview = {
-  totalUsers: number
-  newRegistrations: number
-  activeStudents: number
-  completedCourses: number
-  averageRating: number
-  reviews: number
-  planPurchases: number
-  revenue: number
-}
-
-type AdminUserRecord = {
-  email: string
-  name: string
-  firstName: string
-  lastName: string
-  role: string
-  accountStatus: string
-  isBlocked: boolean
-  createdAt?: string
-}
-
-function buildDailyRegistrationChart(users: AdminUserRecord[]) {
-  const pastDays = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date()
-    date.setHours(0, 0, 0, 0)
-    date.setDate(date.getDate() - (6 - index))
-    return {
-      label: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      key: date.toISOString().slice(0, 10),
-      value: 0
-    }
-  })
-
-  for (const user of users) {
-    if (!user.createdAt) continue
-    const created = new Date(user.createdAt)
-    if (Number.isNaN(created.getTime())) continue
-    const key = created.toISOString().slice(0, 10)
-    const record = pastDays.find((item) => item.key === key)
-    if (record) record.value += 1
-  }
-
-  return pastDays
-}
-
-function buildMonthlyRegistrationChart(users: AdminUserRecord[]) {
-  const months = Array.from({ length: 6 }, (_, index) => {
-    const date = new Date()
-    date.setHours(0, 0, 0, 0)
-    date.setMonth(date.getMonth() - (5 - index), 1)
-    return {
-      label: date.toLocaleDateString('en-US', { month: 'short' }),
-      key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
-      value: 0
-    }
-  })
-
-  for (const user of users) {
-    if (!user.createdAt) continue
-    const created = new Date(user.createdAt)
-    if (Number.isNaN(created.getTime())) continue
-    const key = `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, '0')}`
-    const record = months.find((item) => item.key === key)
-    if (record) record.value += 1
-  }
-
-  return months
-}
-
-function AdminPage({ t, user }: { t: (typeof translations)[Lang]; user: UserProfile | null }) {
-  const language = getCurrentLanguage()
-  const [overview, setOverview] = useState<AdminOverview | null>(null)
-  const [users, setUsers] = useState<AdminUserRecord[]>([])
-  const [, setLoading] = useState(true)
-  const [usersLoading, setUsersLoading] = useState(true)
-  const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
-  const [roleFilter, setRoleFilter] = useState('all')
-  const [error, setError] = useState<string | null>(null)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
-
-  const loadOverview = useCallback(async () => {
-    if (!user?.email) return
-
-    try {
-      const payload = await fetchJson<AdminOverview>(`${API_BASE_URL}/api/admin/overview`, {
-        headers: { 'x-user-email': user.email, 'x-user-role': user.role }
-      })
-      setOverview(payload)
-      setError(null)
-    } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'Failed to load admin overview'
-      setError(message)
-    } finally {
-      setLoading(false)
-    }
-  }, [user?.email, user?.role])
-
-  const loadUsers = useCallback(async () => {
-    if (!user?.email) return
-
-    try {
-      const params = new URLSearchParams()
-      if (search.trim()) params.set('search', search.trim())
-      if (statusFilter !== 'all') params.set('status', statusFilter)
-      if (roleFilter !== 'all') params.set('role', roleFilter)
-
-      const payload = await fetchJson<{ users: AdminUserRecord[] }>(`${API_BASE_URL}/api/admin/users?${params.toString()}`, {
-        headers: { 'x-user-email': user.email, 'x-user-role': user.role }
-      })
-      setUsers(payload.users ?? [])
-      setError(null)
-    } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'Failed to load user list'
-      setError(message)
-    } finally {
-      setUsersLoading(false)
-    }
-  }, [roleFilter, search, statusFilter, user?.email, user?.role])
-
-  useEffect(() => {
-    if (!user?.email) return
-    void loadOverview()
-    void loadUsers()
-  }, [loadOverview, loadUsers, user?.email])
-
-  const updateUserRecord = async (targetEmail: string, update: Partial<AdminUserRecord>) => {
-    if (!user?.email) return
-
-    try {
-      await fetchJson<{ ok: true }>(`${API_BASE_URL}/api/admin/users/${encodeURIComponent(targetEmail)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'x-user-email': user.email, 'x-user-role': user.role },
-        body: JSON.stringify(update)
-      })
-      setUsers((current) => current.map((item) => item.email === targetEmail ? { ...item, ...update } : item))
-      void loadOverview()
-      void loadUsers()
-    } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'User update failed'
-      setError(message)
-    }
-  }
-
-  const deleteUserRecord = async (targetEmail: string) => {
-    if (!user?.email) return
-    if (!window.confirm('Удалить аккаунт пользователя?')) return
-
-    try {
-      await fetchJson<{ ok: true }>(`${API_BASE_URL}/api/admin/users/${encodeURIComponent(targetEmail)}`, {
-        method: 'DELETE',
-        headers: { 'x-user-email': user.email, 'x-user-role': user.role }
-      })
-      setUsers((current) => current.filter((item) => item.email !== targetEmail))
-      void loadOverview()
-      void loadUsers()
-    } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'User deletion failed'
-      setError(message)
-    }
-  }
-
-  const chartDaily = buildDailyRegistrationChart(users)
-  const chartMonthly = buildMonthlyRegistrationChart(users)
-  const maxDaily = Math.max(1, ...chartDaily.map((item) => item.value))
-  const maxMonthly = Math.max(1, ...chartMonthly.map((item) => item.value))
-
-  const stats = [
-    { label: 'Всего пользователей', value: overview?.totalUsers ?? 0, icon: Crown, accent: 'emerald' },
-    { label: 'Новые регистрации', value: overview?.newRegistrations ?? 0, icon: UserRound, accent: 'slate' },
-    { label: 'Активные студенты', value: overview?.activeStudents ?? 0, icon: ShieldCheck, accent: 'cyan' },
-    { label: 'Завершённые курсы', value: overview?.completedCourses ?? 0, icon: BookOpen, accent: 'amber' },
-    { label: 'Средний рейтинг', value: overview ? `${Number(overview.averageRating || 0).toFixed(1)}/5` : '0.0/5', icon: TrendingUp, accent: 'green' },
-    { label: 'Отзывы', value: overview?.reviews ?? 0, icon: MessageSquareText, accent: 'violet' },
-    { label: 'Покупки тарифов', value: overview?.planPurchases ?? 0, icon: WalletCards, accent: 'rose' },
-    { label: 'Доход', value: overview ? `${Number(overview.revenue ?? 0).toLocaleString('ru-RU')} сом` : '0 сом', icon: BookOpen, accent: 'orange' }
-  ]
-
-  return (
-    <div className="admin-shell">
-      {sidebarOpen && <button type="button" className="admin-sidebar-backdrop" onClick={() => setSidebarOpen(false)} aria-label="Close admin menu backdrop" />}
-      <aside className={sidebarOpen ? 'admin-sidebar open' : 'admin-sidebar'}>
-        <div className="admin-brand-wrap">
-          <div className="admin-brand-mark">L</div>
-          <div>
-            <span className="eyebrow">LEVEL UP</span>
-            <strong>Admin</strong>
-          </div>
-          <button type="button" className="admin-sidebar-close" onClick={() => setSidebarOpen(false)} aria-label="Close admin menu">
-            <X size={16} />
-          </button>
-        </div>
-
-        <nav className="admin-nav">
-          {[
-            { label: 'Главная', icon: LayoutDashboard, active: true },
-            { label: 'Пользователи', icon: UserRound },
-            { label: 'Курсы', icon: BookOpen },
-            { label: 'Уроки', icon: Sparkles },
-            { label: 'Отзывы', icon: MessageSquareText },
-            { label: 'Тарифы', icon: WalletCards },
-            { label: 'Платежи', icon: TrendingUp },
-            { label: 'AI Assistant', icon: ShieldCheck },
-            { label: 'Настройки', icon: Settings }
-          ].map(({ label, icon: Icon, active }) => (
-            <button key={label} type="button" className={active ? 'admin-nav-item active' : 'admin-nav-item'}>
-              <Icon size={18} />
-              <span>{label}</span>
-            </button>
-          ))}
-        </nav>
-
-        <div className="admin-panel-profile">
-          <div className="mini-avatar">{user?.name?.charAt(0)?.toUpperCase() ?? 'A'}</div>
-          <div>
-            <strong>{user?.name ?? 'Admin'}</strong>
-            <span>{user?.email ?? 'admin@levelup.kg'}</span>
-          </div>
-        </div>
-      </aside>
-
-      <main className="admin-main">
-        <div className="admin-header">
-          <div>
-            <span className="eyebrow">Dashboard</span>
-            <h1>{t.admin.title}</h1>
-          </div>
-          <div className="admin-header-actions">
-            <button type="button" className="btn btn-secondary small admin-menu-toggle" onClick={() => setSidebarOpen((value) => !value)}>
-              <Menu size={16} /> {language === 'ru' ? 'Меню' : language === 'kg' ? 'Меню' : 'Menu'}
-            </button>
-            <Link to="/home" className="btn btn-secondary small">
-              <ArrowLeft size={14} /> {language === 'ru' ? 'На главную' : language === 'kg' ? 'Башкы бетке' : 'Back to home'}
-            </Link>
-            <button type="button" className="btn btn-primary small">+ Новый курс</button>
-          </div>
-        </div>
-
-        {error && <div className="admin-alert">{error}</div>}
-
-        <section className="admin-stats-grid">
-          {stats.map(({ label, value, icon: Icon, accent }) => (
-            <div key={label} className={`admin-stat-card ${accent}`}>
-              <div className="admin-stat-icon"><Icon size={18} /></div>
-              <div>
-                <strong>{value}</strong>
-                <span>{label}</span>
-              </div>
-            </div>
-          ))}
-        </section>
-
-        <section className="admin-chart-grid">
-          <div className="admin-card chart-card">
-            <div className="admin-card-header">
-              <h3>Регистрации за 7 дней</h3>
-              <span>Live</span>
-            </div>
-            <div className="mini-chart">
-              {chartDaily.map((item) => (
-                <div key={item.key} className="chart-column">
-                  <div className="chart-bar" style={{ height: `${(item.value / maxDaily) * 100}%` }} />
-                  <small>{item.label.split(' ')[0]}</small>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="admin-card chart-card">
-            <div className="admin-card-header">
-              <h3>Активность по месяцам</h3>
-              <span>Users</span>
-            </div>
-            <div className="mini-chart month-chart">
-              {chartMonthly.map((item) => (
-                <div key={item.key} className="chart-column">
-                  <div className="chart-bar" style={{ height: `${(item.value / maxMonthly) * 100}%` }} />
-                  <small>{item.label}</small>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        <section className="admin-card table-card">
-          <div className="admin-card-header">
-            <h3>Пользователи</h3>
-            <div className="table-tools">
-              <label className="search-field">
-                <Search size={16} />
-                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Поиск по имени или email" />
-              </label>
-              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-                <option value="all">Статус: все</option>
-                <option value="active">Активен</option>
-                <option value="blocked">Заблокирован</option>
-                <option value="inactive">Неактивен</option>
-              </select>
-              <select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
-                <option value="all">Роль: все</option>
-                <option value="Admin">Admin</option>
-                <option value="User">User</option>
-                <option value="Student">Student</option>
-              </select>
-            </div>
-          </div>
-
-          {usersLoading ? (
-            <div className="admin-empty-state">Загрузка пользователей...</div>
-          ) : users.length === 0 ? (
-            <div className="admin-empty-state">Пользователи не найдены</div>
-          ) : (
-            <div className="admin-table-wrap">
-              <table className="admin-table">
-                <thead>
-                  <tr>
-                    <th>Пользователь</th>
-                    <th>Роль</th>
-                    <th>Статус</th>
-                    <th>Дата регистрации</th>
-                    <th>Действия</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.map((row) => (
-                    <tr key={row.email}>
-                      <td>
-                        <div className="admin-user-cell">
-                          <div className="mini-avatar tiny">{row.name?.charAt(0)?.toUpperCase() ?? 'U'}</div>
-                          <div>
-                            <strong>{row.name}</strong>
-                            <small>{row.email}</small>
-                          </div>
-                        </div>
-                      </td>
-                      <td>
-                        <select value={row.role} onChange={(event) => void updateUserRecord(row.email, { role: event.target.value })}>
-                          <option value="User">User</option>
-                          <option value="Student">Student</option>
-                          <option value="Admin">Admin</option>
-                        </select>
-                      </td>
-                      <td>
-                        <span className={row.isBlocked ? 'admin-pill danger' : row.accountStatus === 'active' ? 'admin-pill success' : 'admin-pill neutral'}>
-                          {row.isBlocked ? 'Blocked' : row.accountStatus}
-                        </span>
-                      </td>
-                      <td>{row.createdAt ? new Date(row.createdAt).toLocaleDateString('ru-RU') : '—'}</td>
-                      <td>
-                        <div className="admin-actions">
-                          <button type="button" className="btn btn-secondary small" onClick={() => void updateUserRecord(row.email, { accountStatus: row.isBlocked ? 'active' : 'blocked', isBlocked: !row.isBlocked })}>
-                            {row.isBlocked ? 'Разблокировать' : 'Блокировать'}
-                          </button>
-                          <button type="button" className="btn btn-danger small" onClick={() => void deleteUserRecord(row.email)}>
-                            Удалить
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      </main>
-    </div>
-  )
-}
-
 function RatingPage({ t, leaderboard, reviews }: { t: (typeof translations)[Lang]; leaderboard: LeaderboardEntry[]; reviews: Review[] }) {
   const language = getCurrentLanguage()
   const average = reviews.length ? (reviews.reduce((sum, item) => sum + item.rating, 0) / reviews.length).toFixed(1) : '0.0'
@@ -3488,7 +3130,7 @@ function RatingPage({ t, leaderboard, reviews }: { t: (typeof translations)[Lang
   )
 }
 
-function ReviewsPage({ t, reviews, setReviews, isLoggedIn, user, onRefreshSiteStats }: { t: (typeof translations)[Lang]; reviews: Review[]; setReviews: React.Dispatch<React.SetStateAction<Review[]>>; isLoggedIn: boolean; user: UserProfile | null; onRefreshSiteStats?: () => Promise<void> | void }) {
+  function ReviewsPage({ t, reviews, setReviews, isLoggedIn, user, onRefreshSiteStats }: { t: (typeof translations)[Lang]; reviews: Review[]; setReviews: React.Dispatch<React.SetStateAction<Review[]>>; isLoggedIn: boolean; user: UserProfile | null; onRefreshSiteStats?: () => Promise<void> | void }) {
   const [rating, setRating] = useState(5)
   const [text, setText] = useState('')
   const [lessonId, setLessonId] = useState(reviewLessonOptions[0]?.id ?? '')

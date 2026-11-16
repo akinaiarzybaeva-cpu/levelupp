@@ -1,0 +1,2 @@
+◇ injected env (25) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+LevelUp backend is running on port 8787
