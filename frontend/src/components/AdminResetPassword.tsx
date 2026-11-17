@@ -1,16 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertCircle, CheckCircle, Eye, EyeOff, Lock } from 'lucide-react'
+import { API_BASE_URL } from '../api'
 
-function getApiBase(): string {
-  const configured = String(import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '')
-  if (configured) return configured
-  const isLocal = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
-  if (isLocal) return 'http://localhost:8787'
-  return import.meta.env.PROD ? 'https://levelupp-2b3j.onrender.com' : 'http://localhost:8787'
-}
-
-const API_BASE = getApiBase()
+const API_BASE = API_BASE_URL
 
 function passwordStrength(pwd: string): { score: number; label: string; color: string } {
   let score = 0
@@ -25,11 +18,21 @@ function passwordStrength(pwd: string): { score: number; label: string; color: s
   return { score, label: 'Strong', color: '#38a169' }
 }
 
-export default function AdminResetPassword() {
+type ResetAudience = 'admin' | 'user'
+
+/**
+ * Password reset page. Used at /admin/reset-password (administrator) and
+ * /reset-password (regular users); only the texts and the login route differ.
+ */
+export default function AdminResetPassword({ audience = 'admin' }: { audience?: ResetAudience }) {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const [tokenValid, setTokenValid] = useState<boolean | null>(null)
-  const [tokenError, setTokenError] = useState<string | null>(null)
+  const loginPath = audience === 'admin' ? '/admin/login' : '/auth?mode=login'
+  const rawToken = searchParams.get('token') ?? ''
+  const tokenId = searchParams.get('id') ?? ''
+  const hasLinkParams = Boolean(rawToken && tokenId)
+  const [tokenValid, setTokenValid] = useState<boolean | null>(hasLinkParams ? null : false)
+  const [tokenError, setTokenError] = useState<string | null>(hasLinkParams ? null : 'Invalid reset link. The URL is missing required parameters.')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [showNew, setShowNew] = useState(false)
@@ -38,15 +41,8 @@ export default function AdminResetPassword() {
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null)
   const [done, setDone] = useState(false)
 
-  const rawToken = searchParams.get('token') ?? ''
-  const tokenId = searchParams.get('id') ?? ''
-
   useEffect(() => {
-    if (!rawToken || !tokenId) {
-      setTokenValid(false)
-      setTokenError('Invalid reset link. The URL is missing required parameters.')
-      return
-    }
+    if (!rawToken || !tokenId) return
 
     const verifyToken = async () => {
       try {
@@ -109,9 +105,9 @@ export default function AdminResetPassword() {
       setDone(true)
       setNotice({ kind: 'success', message: data.message ?? 'Password reset successfully!' })
 
-      // Redirect to admin login after 3 seconds
+      // Redirect to the login page after 3 seconds
       setTimeout(() => {
-        navigate('/admin/login', { replace: true })
+        navigate(loginPath, { replace: true })
       }, 3000)
     } catch (err) {
       setNotice({ kind: 'error', message: err instanceof Error ? err.message : 'Request failed' })
@@ -149,7 +145,7 @@ export default function AdminResetPassword() {
             <AlertCircle size={16} />
             <span>{tokenError}</span>
           </div>
-          <button type="button" className="btn btn-primary full-width" onClick={() => navigate('/admin/login')}>
+          <button type="button" className="btn btn-primary full-width" onClick={() => navigate(loginPath)}>
             Back to Login
           </button>
         </div>
@@ -163,7 +159,7 @@ export default function AdminResetPassword() {
         <div className="admin-login-brand">
           <div className="admin-brand-mark large"><Lock size={24} /></div>
           <h1>LEVEL UP</h1>
-          <p>Set New Admin Password</p>
+          <p>{audience === 'admin' ? 'Set New Admin Password' : 'Set New Password'}</p>
         </div>
 
         {done ? (
@@ -173,14 +169,14 @@ export default function AdminResetPassword() {
               <span>{notice?.message}</span>
             </div>
             <p className="admin-login-subtitle">Redirecting to login page…</p>
-            <button type="button" className="btn btn-primary full-width" onClick={() => navigate('/admin/login', { replace: true })}>
+            <button type="button" className="btn btn-primary full-width" onClick={() => navigate(loginPath, { replace: true })}>
               Go to Login Now
             </button>
           </div>
         ) : (
           <form className="admin-login-form" onSubmit={(e) => void handleSubmit(e)}>
             <h2>Reset Password</h2>
-            <p className="admin-login-subtitle">Enter a strong new administrator password.</p>
+            <p className="admin-login-subtitle">{audience === 'admin' ? 'Enter a strong new administrator password.' : 'Enter a strong new password for your account.'}</p>
 
             <label>
               <span>New Password</span>
@@ -240,7 +236,7 @@ export default function AdminResetPassword() {
               {submitting ? 'Setting Password…' : 'Set New Password'}
             </button>
 
-            <button type="button" className="btn btn-secondary full-width" onClick={() => navigate('/admin/login')}>
+            <button type="button" className="btn btn-secondary full-width" onClick={() => navigate(loginPath)}>
               Cancel
             </button>
           </form>

@@ -5,7 +5,7 @@ function createTransporter() {
   const port = Number(process.env.EMAIL_PORT ?? 587)
   const user = String(process.env.EMAIL_USER ?? '').trim()
   const pass = String(process.env.EMAIL_PASS ?? '').trim()
-  const from = String(process.env.EMAIL_FROM ?? user ?? 'noreply@levelup.kg').trim()
+  const from = String(process.env.EMAIL_FROM || user || 'noreply@levelup.kg').trim()
 
   if (!host || !user || !pass) {
     return null
@@ -45,7 +45,8 @@ export async function sendEmail({ to, subject, html, text }) {
   return true
 }
 
-export function buildPasswordResetEmail({ resetUrl, expiresMinutes = 30, appName = 'LEVEL UP' }) {
+export function buildPasswordResetEmail({ resetUrl, expiresMinutes = 30, appName = 'LEVEL UP', isAdmin = false }) {
+  const accountLabel = isAdmin ? 'administrator password' : 'password'
   const html = `
 <!DOCTYPE html>
 <html>
@@ -54,7 +55,7 @@ export function buildPasswordResetEmail({ resetUrl, expiresMinutes = 30, appName
   <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 8px rgba(0,0,0,.08)">
     <h1 style="font-size:24px;margin:0 0 8px;color:#1a1a2e">${appName}</h1>
     <h2 style="font-size:18px;margin:0 0 24px;color:#333">Password Reset Request</h2>
-    <p style="color:#555;line-height:1.6">We received a request to reset your administrator password. Click the button below to set a new password.</p>
+    <p style="color:#555;line-height:1.6">We received a request to reset your ${accountLabel}. Click the button below to set a new password.</p>
     <p style="margin:28px 0">
       <a href="${resetUrl}" style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;font-size:15px">Reset Password</a>
     </p>
@@ -71,7 +72,8 @@ export function buildPasswordResetEmail({ resetUrl, expiresMinutes = 30, appName
   return { html, text }
 }
 
-export function buildPasswordChangedEmail({ appName = 'LEVEL UP' }) {
+export function buildPasswordChangedEmail({ appName = 'LEVEL UP', isAdmin = false }) {
+  const accountLabel = isAdmin ? 'administrator password' : 'password'
   const html = `
 <!DOCTYPE html>
 <html>
@@ -80,7 +82,7 @@ export function buildPasswordChangedEmail({ appName = 'LEVEL UP' }) {
   <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 8px rgba(0,0,0,.08)">
     <h1 style="font-size:24px;margin:0 0 8px;color:#1a1a2e">${appName}</h1>
     <h2 style="font-size:18px;margin:0 0 24px;color:#333">Password Changed Successfully</h2>
-    <p style="color:#555;line-height:1.6">Your administrator password was just changed. If this was you, no action is needed.</p>
+    <p style="color:#555;line-height:1.6">Your ${accountLabel} was just changed. If this was you, no action is needed.</p>
     <p style="color:#e53e3e;line-height:1.6">If you did not change your password, contact support immediately and secure your account.</p>
     <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
     <p style="color:#aaa;font-size:12px">© ${new Date().getFullYear()} ${appName}. All rights reserved.</p>

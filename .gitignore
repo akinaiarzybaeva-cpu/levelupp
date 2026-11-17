@@ -24,3 +24,9 @@ backend/*.sqlite
 *.njsproj
 *.sln
 *.sw?
+
+# Local SQLite databases (contain user data) and their WAL/SHM side files
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+backend/server-test-*.txt

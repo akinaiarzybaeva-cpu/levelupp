@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertCircle, CheckCircle, Eye, EyeOff, Lock, ShieldCheck } from 'lucide-react'
+import { API_BASE_URL } from '../api'
 
 type AdminLoginProps = {
   isLoggedIn: boolean
@@ -17,15 +18,12 @@ type AdminUser = {
   lastName?: string
 }
 
-function getApiBase(): string {
-  const configured = String(import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '')
-  if (configured) return configured
-  const isLocal = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
-  if (isLocal) return 'http://localhost:8787'
-  return import.meta.env.PROD ? 'https://levelupp-2b3j.onrender.com' : 'http://localhost:8787'
-}
+const API_BASE = API_BASE_URL
 
-const API_BASE = getApiBase()
+function safeNextPath(value: string | null): string {
+  const next = String(value ?? '').trim()
+  return next.startsWith('/') && !next.startsWith('//') ? next : '/admin'
+}
 
 export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLoginProps) {
   const navigate = useNavigate()
@@ -46,13 +44,17 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
     return false
   })
   const [submitting, setSubmitting] = useState(false)
-  const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null)
+  const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(() =>
+    searchParams.get('reason') === 'forbidden'
+      ? { kind: 'error', message: 'This account does not have administrator access. Sign in with the administrator account.' }
+      : null
+  )
 
   // Redirect if already logged in as admin
   useEffect(() => {
     const isAdmin = isLoggedIn && (userRole?.toLowerCase() === 'admin')
     if (isAdmin) {
-      const next = searchParams.get('next') ?? '/admin'
+      const next = safeNextPath(searchParams.get('next'))
       navigate(next, { replace: true })
     }
   }, [isLoggedIn, userRole, navigate, searchParams])
@@ -87,6 +89,11 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
       }
 
       if (data.user?.role?.toLowerCase() !== 'admin') {
+        // The credentials were valid but not for the administrator: close the session the
+        // server just opened so no stray token stays alive.
+        if (data.token) {
+          void fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', headers: { Authorization: `Bearer ${data.token}` } }).catch(() => undefined)
+        }
         setNotice({ kind: 'error', message: 'Access denied. This login is strictly for administrators.' })
         return
       }
@@ -115,7 +122,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
       }
 
       onLogin(data.token, user)
-      const next = searchParams.get('next') ?? '/admin'
+      const next = safeNextPath(searchParams.get('next'))
       navigate(next, { replace: true })
     } catch (err) {
       const message = err instanceof Error && err.message === 'Failed to fetch'
@@ -230,7 +237,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
 
             <div className="admin-login-footer">
               <span>Regular student?</span>
-              <a href="/auth">Go to student login</a>
+              <Link to="/auth">Go to student login</Link>
             </div>
           </form>
         ) : (

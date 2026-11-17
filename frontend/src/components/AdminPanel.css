@@ -968,3 +968,37 @@
     max-height: 95vh;
   }
 }
+
+/* ─── Theme-aware text colours (audit fix) ──────────────────────────────────
+   index.css still carries the old dark-only admin styles with hard-coded
+   near-white text. This panel paints its surfaces with theme tokens, so in the
+   light theme headings, stat numbers and table text became white-on-white.
+   These rules map the text back onto the theme tokens; in dark mode the tokens
+   resolve to light colours, so the dark look is unchanged. */
+.admin-shell { color: var(--text); }
+.admin-header h1,
+.admin-section-header h2,
+.admin-card-header h3,
+.admin-brand-wrap strong,
+.admin-panel-profile strong,
+.admin-stat-card strong,
+.admin-table td,
+.admin-sidebar-close { color: var(--heading); }
+.admin-stat-card { color: var(--text); }
+.admin-stat-card span,
+.admin-card-header span,
+.admin-panel-profile span,
+.admin-user-cell small,
+.admin-table th,
+.admin-empty-state,
+.chart-column small { color: var(--text-muted); }
+.admin-nav-item:not(.active):not(.danger),
+.admin-nav-item:not(.active):not(.danger):hover { color: var(--text); }
+.search-field { color: var(--text-muted); border-color: var(--border); }
+.search-field input,
+.table-tools select,
+.admin-table select { color: var(--text); }
+.table-tools select,
+.admin-table select { border-color: var(--border); background: var(--surface); }
+.admin-alert { color: #b42318; }
+:root[data-theme='dark'] .admin-alert { color: #ffd7d7; }

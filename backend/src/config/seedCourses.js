@@ -181,42 +181,42 @@ const lessonVideoLibrary = {
 
 const lessonNames = {
   html: {
-    kg: ['Сайт құрылымы', 'HTML тегтер', 'Медиа және суреттер', 'Ақпараттық формалар', 'Кестелер', 'HTML5 құрылымы', 'Архивтелмелер', 'Семантикалық HTML', 'Сілтемелер', 'Медиафайлы', 'Аудио және видеолар', 'Навигация', 'Формалар', 'Терезелер', 'Семантикалық элементтер', 'Структуралың төлөв', 'Фреймдер', 'API және атрибуттар', 'Жұмысқа негіз', 'HTML проекті'],
+    kg: ['Сайттын түзүлүшү', 'HTML тегдери', 'Медиа жана сүрөттөр', 'Маалымат формалары', 'Таблицалар', 'HTML5 түзүлүшү', 'Тизмелер', 'Семантикалык HTML', 'Шилтемелер', 'Медиафайлдар', 'Аудио жана видео', 'Навигация', 'Формалар', 'Текшерүү (валидация)', 'Семантикалык элементтер', 'Түзүмдүк үлгүлөр', 'Фреймдер', 'API жана атрибуттар', 'Практика', 'HTML долбоору'],
     ru: ['Структура сайта', 'Теги HTML', 'Медиа и изображения', 'Формы данных', 'Таблицы', 'Структура HTML5', 'Списки', 'Семантический HTML', 'Ссылки', 'Медиафайлы', 'Аудио и видео', 'Навигация', 'Формы', 'Валидация', 'Семантические элементы', 'Структурные паттерны', 'Фреймы', 'API и атрибуты', 'Практика', 'Проект HTML'],
     en: ['Website structure', 'HTML tags', 'Media and images', 'Form fields', 'Tables', 'HTML5 structure', 'Lists', 'Semantic HTML', 'Links', 'Media files', 'Audio and video', 'Navigation', 'Forms', 'Validation', 'Semantic elements', 'Structure patterns', 'Frames', 'API and attributes', 'Practice', 'HTML project']
   },
   css: {
-    kg: ['CSS негіздері', 'Селекторлар', 'Өлшемдер', 'Түс схемасы', 'Өлшем және_PADDING', 'Фоны', 'Позициялау', 'Flexbox', 'Grid', 'Responsive дизайн', 'Типография', 'Анимациялар', 'Трансформация', 'Медиа сұраныстар', 'Карта және навигация', 'Кнопкалар', 'Карталар', 'Модульдер', 'Дизайн жүйе', 'CSS проекті'],
+    kg: ['CSS негиздери', 'Селекторлор', 'Өлчөмдөр', 'Түстөр', 'Ички жана тышкы аралыктар', 'Фон', 'Жайгаштыруу', 'Flexbox', 'Grid', 'Адаптивдүү дизайн', 'Типография', 'Анимациялар', 'Трансформациялар', 'Медиа-суроолор', 'Карточкалар жана навигация', 'Баскычтар', 'Сүрөттөр', 'Компонент үлгүлөрү', 'Дизайн-система', 'CSS долбоору'],
     ru: ['Основы CSS', 'Селекторы', 'Размеры', 'Цвета', 'Отступы и поля', 'Фон', 'Позиционирование', 'Flexbox', 'Grid', 'Адаптивный дизайн', 'Типография', 'Анимации', 'Трансформации', 'Медиа-запросы', 'Карточки и навигация', 'Кнопки', 'Изображения', 'Модели компонентов', 'Дизайн-система', 'Проект CSS'],
     en: ['CSS basics', 'Selectors', 'Sizes', 'Color system', 'Spacing', 'Backgrounds', 'Positioning', 'Flexbox', 'Grid', 'Responsive design', 'Typography', 'Animations', 'Transforms', 'Media queries', 'Cards and navigation', 'Buttons', 'Images', 'Component patterns', 'Design system', 'CSS project']
   },
   javascript: {
-    kg: ['JavaScript негіздері', 'Айнымалылар', 'Массивтер', 'Нысандар', 'Функциялар', 'Шарттар', 'Loops', 'DOM', 'Элементтер', 'Events', 'Form validation', 'Promises', 'Async/await', 'Modules', 'Data fetching', 'Storage', 'OOP basics', 'ES6 features', 'Project', 'Advanced app'],
+    kg: ['JavaScript негиздери', 'Өзгөрмөлөр', 'Массивдер', 'Объекттер', 'Функциялар', 'Шарттар', 'Циклдер', 'DOM', 'Элементтер', 'Окуялар (events)', 'Формаларды текшерүү', 'Promise', 'Async/await', 'Модулдар', 'Маалымат алуу (fetch)', 'Сактагыч (storage)', 'ООП негиздери', 'ES6 мүмкүнчүлүктөрү', 'Долбоор', 'Татаал долбоор'],
     ru: ['Основы JavaScript', 'Переменные', 'Массивы', 'Объекты', 'Функции', 'Условия', 'Циклы', 'DOM', 'Элементы', 'События', 'Валидация форм', 'Promise', 'Async/await', 'Модули', 'Запросы', 'Хранилище', 'ООП', 'ES6', 'Проект', 'Продвинутый проект'],
     en: ['JavaScript basics', 'Variables', 'Arrays', 'Objects', 'Functions', 'Conditions', 'Loops', 'DOM', 'Elements', 'Events', 'Form validation', 'Promises', 'Async/await', 'Modules', 'Fetching data', 'Storage', 'OOP basics', 'ES6 features', 'Project', 'Advanced app']
   },
   ai: {
-    kg: ['ИИге кіріспе', 'Машиналық оқыту', 'Жасанды нейрондар', 'Prompt engineering', 'Модельдердің типтері', 'Деректерді өңдеу', 'Терминилер', 'ИИ көмегі', 'Генеративті ИИ', 'Этика', 'Автоматизация', 'Код талдау', 'Диалогтар', 'Рекомендациялар', 'Модель бағалау', 'AI жобасы', 'Лаборатория', 'Пайдалану сценарийлері', 'Нәтиже', 'AI проект'],
+    kg: ['ИИге киришүү', 'Машиналык окутуу', 'Нейрон тармактары', 'Промпт-инжиниринг', 'Моделдердин түрлөрү', 'Маалыматтарды иштетүү', 'Негизги терминдер', 'ИИнин жардамы', 'Генеративдик ИИ', 'Этика', 'Автоматташтыруу', 'Кодду талдоо', 'Диалогдор', 'Сунуштар', 'Моделдерди баалоо', 'AI долбоору', 'Лаборатория', 'Колдонуу сценарийлери', 'Жыйынтыктар', 'AI боюнча долбоор'],
     ru: ['Введение в ИИ', 'Машинное обучение', 'Нейросети', 'Промпт-инжиниринг', 'Типы моделей', 'Обработка данных', 'Основные термины', 'Помощь ИИ', 'Генеративный ИИ', 'Этика', 'Автоматизация', 'Анализ кода', 'Диалоги', 'Рекомендации', 'Оценка моделей', 'AI-проект', 'Лаборатория', 'Сценарии использования', 'Итоги', 'Проект AI'],
     en: ['AI introduction', 'Machine learning', 'Neural networks', 'Prompt engineering', 'Model types', 'Data processing', 'Core terms', 'AI assistance', 'Generative AI', 'Ethics', 'Automation', 'Code review', 'Dialogues', 'Recommendations', 'Model evaluation', 'AI project', 'Lab sessions', 'Use cases', 'Wrap up', 'AI project']
   },
   english: {
-    kg: ['Негізгі сөздік', 'Сәлемдесу', 'Күнделікті сұхбат', 'Өмірлік тақырыптар', 'Сөйлеу дағдылары', 'Лексика', 'Грамматика', 'Сөйлеу мәдениеті', 'Жазу дағдылары', 'Тыңдау', 'Мәтін оқу', 'Диалог', 'Сұрақ қою', 'Жауап беру', 'Тіл үйрену', 'Өткінші жағдай', 'Тақырыптар', 'Білікті сөйлеу', 'Практика', 'Английский проект'],
+    kg: ['Тилдин негиздери', 'Саламдашуу', 'Күнүмдүк диалогдор', 'Турмуш-тиричилик темалары', 'Оозеки сүйлөө', 'Лексика', 'Грамматика', 'Сүйлөшүү стили', 'Жазуу', 'Угуп түшүнүү', 'Окуу', 'Диалог', 'Суроолор', 'Жооптор', 'Тил үйрөнүү', 'Ролдук практика', 'Баарлашуу темалары', 'Эркин сүйлөө', 'Практика', 'Англис тили боюнча долбоор'],
     ru: ['Основы языка', 'Приветствия', 'Повседневные диалоги', 'Бытовые темы', 'Говорение', 'Лексика', 'Грамматика', 'Разговорный стиль', 'Письмо', 'Аудирование', 'Чтение', 'Диалог', 'Вопросы', 'Ответы', 'Изучение языка', 'Ролевая практика', 'Темы общения', 'Свободное говорение', 'Практика', 'Проект по английскому'],
     en: ['English basics', 'Greetings', 'Daily conversations', 'Everyday topics', 'Speaking skills', 'Vocabulary', 'Grammar', 'Conversation flow', 'Writing', 'Listening', 'Reading', 'Dialogues', 'Questions', 'Answers', 'Language learning', 'Role play', 'Talk topics', 'Fluent speaking', 'Practice', 'English project']
   },
   math: {
-    kg: ['Сандар әлемі', 'Функциялар', 'Логика', 'Алгебра', 'Графиктер', 'Статистика', 'Вероятность', 'Процент', 'Модельдеу', 'Теңдеулер', 'Деректер', 'Жиындар', 'Комбинаторика', 'Рекурсия', 'Қайталанулар', 'Математикалық дәлел', 'Прогрессия', 'Сериялар', 'Қарапайым есептер', 'Математика проекті'],
+    kg: ['Сандар дүйнөсү', 'Функциялар', 'Логика', 'Алгебра', 'Графиктер', 'Статистика', 'Ыктымалдык', 'Пайыздар', 'Моделдөө', 'Теңдемелер', 'Маалыматтар', 'Көптүктөр', 'Комбинаторика', 'Рекурсия', 'Удаалаштыктар', 'Математикалык далилдөө', 'Прогрессиялар', 'Катарлар', 'Маселелер', 'Математика боюнча долбоор'],
     ru: ['Мир чисел', 'Функции', 'Логика', 'Алгебра', 'Графики', 'Статистика', 'Вероятность', 'Проценты', 'Моделирование', 'Уравнения', 'Данные', 'Множества', 'Комбинаторика', 'Рекурсия', 'Последовательности', 'Математическое доказательство', 'Прогрессии', 'Ряды', 'Задачи', 'Проект по математике'],
     en: ['World of numbers', 'Functions', 'Logic', 'Algebra', 'Graphs', 'Statistics', 'Probability', 'Percentages', 'Modeling', 'Equations', 'Data', 'Sets', 'Combinatorics', 'Recursion', 'Sequences', 'Proofs', 'Progressions', 'Series', 'Practice', 'Math project']
   },
   physics: {
-    kg: ['Физикаға кіріспе', 'Қозғалыс', 'Күштер', 'Энергия', 'Жұмыс', 'Температура', 'Электр', 'Магнетизм', 'Толқындар', 'Оптика', 'Атом', 'Механика', 'Ғылыми өлшеу', 'Динамика', 'Станция', 'Заттың күйі', 'Молекулалар', 'Сұйықтар', 'Атомдық құрылым', 'Физика проекті'],
+    kg: ['Физикага киришүү', 'Кыймыл', 'Күчтөр', 'Энергия', 'Жумуш', 'Температура', 'Электр', 'Магнетизм', 'Толкундар', 'Оптика', 'Атом', 'Механика', 'Өлчөөлөр', 'Динамика', 'Заттын абалы', 'Молекулалар', 'Суюктуктар', 'Атомдук түзүлүш', 'Корутунду', 'Физика боюнча долбоор'],
     ru: ['Введение в физику', 'Движение', 'Силы', 'Энергия', 'Работа', 'Температура', 'Электричество', 'Магнетизм', 'Волны', 'Оптика', 'Атом', 'Механика', 'Измерения', 'Динамика', 'Состояние вещества', 'Молекулы', 'Жидкости', 'Атомные структуры', 'Заключение', 'Проект по физике'],
     en: ['Physics basics', 'Motion', 'Forces', 'Energy', 'Work', 'Temperature', 'Electricity', 'Magnetism', 'Waves', 'Optics', 'Atoms', 'Mechanics', 'Measurements', 'Dynamics', 'States of matter', 'Molecules', 'Fluids', 'Atomic structures', 'Review', 'Physics project']
   },
   webdesign: {
-    kg: ['Дизайн негіздері', 'Визуалды иерархия', 'Түс теориясы', 'Макет', 'Типография', 'Медиа', 'Шрифт және көлемдер', 'Басқару элементтері', 'Навигация', 'Карточкалар', 'Форма стилі', 'Түсті палитра', 'Анимациялар', 'Кнопкалар', 'Лайаут', 'Мобильді дизайн', 'Темалар', 'Сайт композициясы', 'Жұмыс тәжірибесі', 'Web design проекті'],
+    kg: ['Дизайн негиздери', 'Визуалдык иерархия', 'Түс теориясы', 'Макет', 'Типография', 'Медиа', 'Шрифттер жана өлчөмдөр', 'Башкаруу элементтери', 'Навигация', 'Карточкалар', 'Формалардын стили', 'Палитра', 'Анимациялар', 'Баскычтар', 'Композиция', 'Мобилдик дизайн', 'Темалар', 'Тор системасы', 'Практика', 'Веб-дизайн боюнча долбоор'],
     ru: ['Основы дизайна', 'Визуальная иерархия', 'Цветовая теория', 'Макет', 'Типография', 'Медиа', 'Шрифты и размеры', 'Элементы управления', 'Навигация', 'Карточки', 'Стили форм', 'Палитра', 'Анимации', 'Кнопки', 'Композиция', 'Мобильный дизайн', 'Темы', 'Сеточная система', 'Практика', 'Проект по веб-дизайну'],
     en: ['Design basics', 'Visual hierarchy', 'Color theory', 'Layout', 'Typography', 'Media', 'Fonts and spacing', 'Controls', 'Navigation', 'Cards', 'Form styling', 'Palette', 'Animations', 'Buttons', 'Composition', 'Mobile design', 'Themes', 'Grid system', 'Practice', 'Web design project']
   }
@@ -229,7 +229,7 @@ export const initialCourses = [
     title_kg: 'HTML',
     title_ru: 'HTML',
     title_en: 'HTML',
-    description_kg: 'Веб-структура, семантика, формы және современные HTML практикалары.',
+    description_kg: 'Веб-сайттардын түзүлүшү, семантика, формалар жана заманбап HTML практикалары.',
     description_ru: 'Структура веб-сайтов, семантика, формы и практики современного HTML.',
     description_en: 'Build website structure, semantics, forms, and modern HTML practices.',
     category: 'Frontend',
@@ -251,7 +251,7 @@ export const initialCourses = [
     title_kg: 'CSS',
     title_ru: 'CSS',
     title_en: 'CSS',
-    description_kg: 'Дизайн, визуализация, адаптивность және стиль UI.',
+    description_kg: 'Сайттардын визуалдык дизайны, заманбап торлор, flexbox, grid жана адаптивдүү калып.',
     description_ru: 'Визуальный дизайн сайтов, современные сетки, flexbox, grid и адаптивная вёрстка.',
     description_en: 'Style web layouts with modern visual design, Flexbox, Grid, and mobile responsiveness.',
     category: 'Frontend',
@@ -273,7 +273,7 @@ export const initialCourses = [
     title_kg: 'JavaScript',
     title_ru: 'JavaScript',
     title_en: 'JavaScript',
-    description_kg: 'Интерактивті веб-беттер, логика, DOM және заманауи JS негіздері.',
+    description_kg: 'Интерактивдүү интерфейстер, тиркемелердин логикасы, DOM менен иштөө жана заманбап JavaScript.',
     description_ru: 'Интерактивные интерфейсы, логика приложений, работа с DOM и современный JavaScript.',
     description_en: 'Create interactive web apps with application logic, DOM scripting, and modern ES6+.',
     category: 'Frontend',
@@ -292,10 +292,10 @@ export const initialCourses = [
   {
     id: 'ai',
     badge: 'Future',
-    title_kg: 'Жасанды Интеллект (AI)',
+    title_kg: 'Жасалма интеллект (AI)',
     title_ru: 'Искусственный Интеллект (AI)',
     title_en: 'Artificial Intelligence (AI)',
-    description_kg: 'ИИ көмекшілері, prompt-инжиниринг, негізгі концепциялар және практика.',
+    description_kg: 'Заманбап ИИ-куралдарына киришүү, промпт-инжиниринг жана иштеп чыгуучунун милдеттерин автоматташтыруу.',
     description_ru: 'Введение в современные ИИ-инструменты, промпт-инжиниринг и автоматизацию задач разработчика.',
     description_en: 'Learn foundational AI, smart prompting, assistive coding, and workflow automation.',
     category: 'AI & Data',
@@ -314,10 +314,10 @@ export const initialCourses = [
   {
     id: 'english',
     badge: 'Global',
-    title_kg: 'IT үшін Ағылшын тілі',
+    title_kg: 'IT үчүн англис тили',
     title_ru: 'Английский для IT',
     title_en: 'English for IT',
-    description_kg: 'IT-терминология, техникалық құжаттама, сұхбаттасу және халықаралық қарым-қатынас.',
+    description_kg: 'Кесиптик лексика, документацияны окуу, интервьюдан өтүү жана командада баарлашуу.',
     description_ru: 'Профессиональная лексика, чтение документации, прохождение интервью и коммуникация в команде.',
     description_en: 'Master technical terminology, engineering docs, interview readiness, and workplace communication.',
     category: 'Career',
@@ -336,10 +336,10 @@ export const initialCourses = [
   {
     id: 'math',
     badge: 'Logic',
-    title_kg: 'Бағдарламашыларға арналған Математика',
+    title_kg: 'Программисттер үчүн математика',
     title_ru: 'Математика для программистов',
     title_en: 'Math for Developers',
-    description_kg: 'Дискретті математика, алгоритмдік ойлау, логика және деректер құрылымы.',
+    description_kg: 'Дискреттик математика, алгоритмдик ой жүгүртүү, графтар теориясы жана эсептөөлөрдүн негиздери.',
     description_ru: 'Дискретная математика, алгоритмическое мышление, теория графов и основы вычислений.',
     description_en: 'Build discrete math intuition, logic, graph concepts, and algorithmic foundations.',
     category: 'CS Basics',
@@ -358,10 +358,10 @@ export const initialCourses = [
   {
     id: 'physics',
     badge: 'Science',
-    title_kg: 'Қолданбалы Физика',
+    title_kg: 'Колдонмо физика',
     title_ru: 'Прикладная Физика',
     title_en: 'Applied Physics',
-    description_kg: 'Ойын физикасы, механика және интерактивті модельдеу негіздері.',
+    description_kg: 'Механиканын негиздери, кыймыл мыйзамдары жана иштеп чыгуучулар үчүн физикалык процесстерди симуляциялоо.',
     description_ru: 'Основы механики, законы движения и симуляция физических процессов для разработчиков.',
     description_en: 'Learn mechanics, motion laws, and physical simulation principles for software and games.',
     category: 'Science',
@@ -380,10 +380,10 @@ export const initialCourses = [
   {
     id: 'webdesign',
     badge: 'Visual',
-    title_kg: 'UI/UX Веб Дизайн',
+    title_kg: 'UI/UX веб-дизайн',
     title_ru: 'UI/UX Веб Дизайн',
     title_en: 'UI/UX Web Design',
-    description_kg: 'Figma, пайдаланушы интерфейстері, эргономика және заманауи дизайн.',
+    description_kg: "Колдонуучу тажрыйбасын долбоорлоо, дизайн-системалар, Figma'да прототиптөө жана композиция.",
     description_ru: 'Проектирование пользовательского опыта, дизайн-системы, прототипирование в Figma и композиция.',
     description_en: 'Master UI layout, design systems, Figma workflows, and user-centric web aesthetics.',
     category: 'Design',
@@ -451,7 +451,7 @@ export function seedCoursesAndLessonsIfEmpty(db) {
           const lessonId = `${c.id}-lesson-${i + 1}`
           const quiz = {
             prompt: {
-              kg: 'Правильный ответ на вопрос урока?',
+              kg: 'Сабактын суроосуна туура жооп кайсы?',
               ru: 'Какой ответ на вопрос урока?',
               en: 'What is the correct answer to this lesson question?'
             },
@@ -462,7 +462,7 @@ export function seedCoursesAndLessonsIfEmpty(db) {
           insertLessonStmt.run({
             id: lessonId,
             course_id: c.id,
-            title_kg: `Сабақ ${i + 1}. ${names.kg[i]}`,
+            title_kg: `Сабак ${i + 1}. ${names.kg[i]}`,
             title_ru: `Урок ${i + 1}. ${names.ru[i]}`,
             title_en: `Lesson ${i + 1}. ${names.en[i]}`,
             duration: `${35 + ((i * 13) % 28)} мин`,

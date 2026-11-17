@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   Bell,
   BookOpen,
@@ -32,7 +32,9 @@ import {
   ArrowUp,
   ArrowDown
 } from 'lucide-react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink } from 'react-router-dom'
+import { apiFetch, createClientId } from '../api'
+import siteLogo from '../assets/logo.webp'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +68,13 @@ type AdminUserRecord = {
   accountStatus: string
   isBlocked: boolean
   createdAt?: string
+}
+
+type AdminUserDetail = {
+  user: AdminUserRecord
+  subscription: { planId: string; status: string; endsAt: string } | null
+  progress: Array<{ course_id: string; lessons_completed: number; lessons_started: number; status: string }>
+  reviews: Array<{ id: string }>
 }
 
 type AdminCourse = {
@@ -189,31 +198,16 @@ type AdminSection =
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getApiBaseUrl(): string {
-  const configured = String(import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '')
-  if (configured) return configured
-  const isLocal = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
-  if (isLocal) return 'http://localhost:8787'
-  return import.meta.env.PROD ? 'https://levelupp-2b3j.onrender.com' : 'http://localhost:8787'
-}
+const adminFetch = apiFetch
 
-const API_BASE = getApiBaseUrl()
-
-async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = window.localStorage.getItem('levelup-auth-token') ?? ''
-  const headers = new Headers(init?.headers ?? {})
-
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
-
-  const response = await fetch(`${API_BASE}${path}`, { ...init, headers })
-  const payload = await response.json().catch(() => ({})) as { error?: string }
-
-  if (!response.ok) {
-    throw new Error(payload.error ?? `Request failed (${response.status})`)
-  }
-  return payload as T
+/** Delays search input so typing does not fire one API request per keystroke. */
+function useDebouncedValue<T>(value: T, delayMs = 350): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs)
+    return () => window.clearTimeout(timer)
+  }, [value, delayMs])
+  return debounced
 }
 
 function statusPill(status: string, isBlocked: boolean) {
@@ -275,7 +269,7 @@ function useToast() {
   const [toasts, setToasts] = useState<Toast[]>([])
 
   const addToast = useCallback((message: string, kind: ToastKind = 'info') => {
-    const id = crypto.randomUUID()
+    const id = createClientId()
     setToasts((current) => [...current, { id, message, kind }])
     setTimeout(() => setToasts((current) => current.filter((t) => t.id !== id)), 4500)
   }, [])
@@ -305,6 +299,59 @@ function ConfirmDialog({ message, onConfirm, onCancel }: { message: string; onCo
 }
 
 // ─── Dashboard section ────────────────────────────────────────────────────────
+
+/** Bar charts built only from the real /api/admin/stats numbers (no invented data). */
+function AdminInsights({ stats }: { stats: AdminStats }) {
+  const groups = [
+    {
+      title: 'Learning funnel',
+      rows: [
+        { label: 'Users', value: stats.totalUsers },
+        { label: 'Courses started', value: stats.startedCourses },
+        { label: 'Courses completed', value: stats.completedCourses }
+      ]
+    },
+    {
+      title: 'Subscriptions',
+      rows: [
+        { label: 'Active', value: stats.activeSubscriptions },
+        { label: 'PRO', value: stats.proSubscriptions },
+        { label: 'AI PRO', value: stats.aiproSubscriptions }
+      ]
+    },
+    {
+      title: 'Reviews moderation',
+      rows: [
+        { label: 'Published', value: Math.max(0, stats.totalReviews - stats.pendingReviews) },
+        { label: 'Pending', value: stats.pendingReviews }
+      ]
+    }
+  ]
+
+  return (
+    <div className="admin-insights">
+      {groups.map((group) => {
+        const max = Math.max(1, ...group.rows.map((row) => Number(row.value) || 0))
+        return (
+          <div key={group.title} className="admin-card admin-chart-card">
+            <h3>{group.title}</h3>
+            <div className="admin-bars">
+              {group.rows.map((row) => (
+                <div key={row.label} className="admin-bar-row">
+                  <span>{row.label}</span>
+                  <div className="admin-bar-track" role="img" aria-label={`${row.label}: ${row.value}`}>
+                    <div className="admin-bar-fill" style={{ width: `${Math.round(((Number(row.value) || 0) / max) * 100)}%` }} />
+                  </div>
+                  <strong>{row.value}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 function DashboardSection({
   stats,
@@ -366,6 +413,8 @@ function DashboardSection({
         ))}
       </div>
 
+      {stats && <AdminInsights stats={stats} />}
+
       {stats?.recentUsers && stats.recentUsers.length > 0 && (
         <div className="admin-card">
           <div className="admin-card-header">
@@ -420,17 +469,39 @@ function UsersSection({ currentUserEmail, onToast }: { currentUserEmail: string;
   const [users, setUsers] = useState<AdminUserRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const debouncedSearch = useDebouncedValue(search)
   const [statusFilter, setStatusFilter] = useState('all')
   const [roleFilter, setRoleFilter] = useState('all')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [expandedUser, setExpandedUser] = useState<string | null>(null)
+  const [userDetail, setUserDetail] = useState<AdminUserDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [editingUser, setEditingUser] = useState<AdminUserRecord | null>(null)
+
+  const toggleUserDetail = async (email: string) => {
+    if (expandedUser === email) {
+      setExpandedUser(null)
+      setUserDetail(null)
+      return
+    }
+    setExpandedUser(email)
+    setUserDetail(null)
+    setDetailLoading(true)
+    try {
+      setUserDetail(await adminFetch<AdminUserDetail>(`/api/admin/users/${encodeURIComponent(email)}/detail`))
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Failed to load user details', 'error')
+      setExpandedUser(null)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
 
   const loadUsers = useCallback(async () => {
     setLoading(true)
     try {
       const params = new URLSearchParams()
-      if (search.trim()) params.set('search', search.trim())
+      if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim())
       if (statusFilter !== 'all') params.set('status', statusFilter)
       if (roleFilter !== 'all') params.set('role', roleFilter)
       const data = await adminFetch<{ users: AdminUserRecord[] }>(`/api/admin/users?${params}`)
@@ -440,7 +511,7 @@ function UsersSection({ currentUserEmail, onToast }: { currentUserEmail: string;
     } finally {
       setLoading(false)
     }
-  }, [search, statusFilter, roleFilter, onToast])
+  }, [debouncedSearch, statusFilter, roleFilter, onToast])
 
   useEffect(() => {
     void loadUsers()
@@ -608,7 +679,8 @@ function UsersSection({ currentUserEmail, onToast }: { currentUserEmail: string;
               </thead>
               <tbody>
                 {users.map((row) => (
-                  <tr key={row.email} className={expandedUser === row.email ? 'admin-row-expanded' : ''}>
+                  <Fragment key={row.email}>
+                  <tr className={expandedUser === row.email ? 'admin-row-expanded' : ''}>
                     <td>
                       <div className="admin-user-cell">
                         <div className="mini-avatar tiny">{row.name?.charAt(0)?.toUpperCase() ?? 'U'}</div>
@@ -658,14 +730,47 @@ function UsersSection({ currentUserEmail, onToast }: { currentUserEmail: string;
                         <button
                           type="button"
                           className="btn btn-secondary small"
-                          onClick={() => setExpandedUser(expandedUser === row.email ? null : row.email)}
+                          onClick={() => void toggleUserDetail(row.email)}
                           aria-label="Toggle details"
+                          aria-expanded={expandedUser === row.email}
                         >
                           {expandedUser === row.email ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                         </button>
                       </div>
                     </td>
                   </tr>
+                  {expandedUser === row.email && (
+                    <tr className="admin-row-detail">
+                      <td colSpan={5}>
+                        {detailLoading || !userDetail ? (
+                          <div className="admin-empty-state"><RefreshCw size={16} className="spin" /> Loading details…</div>
+                        ) : (
+                          <div className="admin-info-list">
+                            <div className="admin-info-row"><span>Phone</span><strong>{userDetail.user.phone || '—'}</strong></div>
+                            <div className="admin-info-row"><span>Bio</span><small>{userDetail.user.bio || '—'}</small></div>
+                            <div className="admin-info-row">
+                              <span>Subscription</span>
+                              <strong>
+                                {userDetail.subscription
+                                  ? `${userDetail.subscription.planId.toUpperCase()} · ${userDetail.subscription.status} · until ${formatDate(userDetail.subscription.endsAt)}`
+                                  : 'FREE (no paid plan)'}
+                              </strong>
+                            </div>
+                            <div className="admin-info-row">
+                              <span>Course progress</span>
+                              <small>
+                                {userDetail.progress.length === 0
+                                  ? 'No courses started'
+                                  : userDetail.progress.map((p) => `${p.course_id}: ${p.lessons_completed} done (${p.status})`).join(' · ')}
+                              </small>
+                            </div>
+                            <div className="admin-info-row"><span>Reviews</span><strong>{userDetail.reviews.length}</strong></div>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -1573,6 +1678,7 @@ function ReviewsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) =
   const [reviews, setReviews] = useState<AdminReview[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const debouncedSearch = useDebouncedValue(search)
   const [statusFilter, setStatusFilter] = useState('all')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
@@ -1580,7 +1686,7 @@ function ReviewsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) =
     setLoading(true)
     try {
       const params = new URLSearchParams()
-      if (search.trim()) params.set('search', search.trim())
+      if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim())
       if (statusFilter !== 'all') params.set('status', statusFilter)
       const data = await adminFetch<{ reviews: AdminReview[] }>(`/api/admin/reviews?${params}`)
       setReviews(data.reviews ?? [])
@@ -1589,7 +1695,7 @@ function ReviewsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) =
     } finally {
       setLoading(false)
     }
-  }, [search, statusFilter, onToast])
+  }, [debouncedSearch, statusFilter, onToast])
 
   useEffect(() => {
     void loadReviews()
@@ -1731,6 +1837,7 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
   const [subscriptions, setSubscriptions] = useState<AdminSubscription[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const debouncedSearch = useDebouncedValue(search)
   const [planFilter, setPlanFilter] = useState('all')
   const [grantTarget, setGrantTarget] = useState<string | null>(null)
   const [grantPlan, setGrantPlan] = useState('pro')
@@ -1739,7 +1846,7 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
     setLoading(true)
     try {
       const params = new URLSearchParams()
-      if (search.trim()) params.set('search', search.trim())
+      if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim())
       if (planFilter !== 'all') params.set('plan', planFilter)
       const data = await adminFetch<{ subscriptions: AdminSubscription[] }>(`/api/admin/subscriptions?${params}`)
       setSubscriptions(data.subscriptions ?? [])
@@ -1748,7 +1855,7 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
     } finally {
       setLoading(false)
     }
-  }, [search, planFilter, onToast])
+  }, [debouncedSearch, planFilter, onToast])
 
   useEffect(() => { void loadSubs() }, [loadSubs])
 
@@ -1879,13 +1986,14 @@ function PaymentsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) 
   const [payments, setPayments] = useState<AdminPayment[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const debouncedSearch = useDebouncedValue(search)
   const [statusFilter, setStatusFilter] = useState('all')
 
   const loadPayments = useCallback(async () => {
     setLoading(true)
     try {
       const params = new URLSearchParams()
-      if (search.trim()) params.set('search', search.trim())
+      if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim())
       if (statusFilter !== 'all') params.set('status', statusFilter)
       const data = await adminFetch<{ payments: AdminPayment[] }>(`/api/admin/payments?${params}`)
       setPayments(data.payments ?? [])
@@ -1894,7 +2002,7 @@ function PaymentsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) 
     } finally {
       setLoading(false)
     }
-  }, [search, statusFilter, onToast])
+  }, [debouncedSearch, statusFilter, onToast])
 
   useEffect(() => { void loadPayments() }, [loadPayments])
 
@@ -2004,7 +2112,6 @@ function PaymentsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) 
 // ─── Settings section ─────────────────────────────────────────────────────────
 
 function SettingsSection({ adminEmail, onLogout, onToast }: { adminEmail: string; onLogout: () => void; onToast: (msg: string, kind: ToastKind) => void }) {
-  const navigate = useNavigate()
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -2036,6 +2143,16 @@ function SettingsSection({ adminEmail, onLogout, onToast }: { adminEmail: string
       return
     }
 
+    if (!/[A-Za-zА-Яа-яЁё]/.test(newPassword) || !/\d/.test(newPassword)) {
+      setNotice({ kind: 'error', message: 'New password must contain both letters and digits' })
+      return
+    }
+
+    if (newPassword === currentPassword) {
+      setNotice({ kind: 'error', message: 'New password must be different from the current password' })
+      return
+    }
+
     setSubmitting(true)
     try {
       await adminFetch('/api/admin/settings/password', {
@@ -2051,11 +2168,7 @@ function SettingsSection({ adminEmail, onLogout, onToast }: { adminEmail: string
       setConfirmPassword('')
 
       setTimeout(() => {
-        window.localStorage.removeItem('levelup-auth-token')
-        window.localStorage.removeItem('levelup-user')
-        window.localStorage.removeItem('levelup-auth')
         onLogout()
-        navigate('/admin/login', { replace: true })
       }, 1800)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Password change failed'
@@ -2150,7 +2263,7 @@ function SettingsSection({ adminEmail, onLogout, onToast }: { adminEmail: string
               <li className={newPassword.length >= 8 ? 'rule-met' : ''}>At least 8 characters</li>
               <li className={/[A-Z]/.test(newPassword) ? 'rule-met' : ''}>At least one uppercase letter</li>
               <li className={/[0-9]/.test(newPassword) ? 'rule-met' : ''}>At least one number</li>
-              <li className={Boolean(passwordsMatch) ? 'rule-met' : ''}>Passwords match</li>
+              <li className={passwordsMatch ? 'rule-met' : ''}>Passwords match</li>
             </ul>
 
             {notice && (
@@ -2199,12 +2312,7 @@ function SettingsSection({ adminEmail, onLogout, onToast }: { adminEmail: string
           <button
             type="button"
             className="btn btn-danger full-width"
-            onClick={() => {
-              window.localStorage.removeItem('levelup-auth-token')
-              window.localStorage.removeItem('levelup-user')
-              onLogout()
-              navigate('/admin/login', { replace: true })
-            }}
+            onClick={onLogout}
           >
             <LogOut size={15} /> Secure Logout
           </button>
@@ -2222,7 +2330,6 @@ type AdminPanelProps = {
 }
 
 export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
-  const navigate = useNavigate()
   const [activeSection, setActiveSection] = useState<AdminSection>('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [stats, setStats] = useState<AdminStats | null>(null)
@@ -2277,7 +2384,7 @@ export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
 
       <aside ref={sidebarRef} className={sidebarOpen ? 'admin-sidebar open' : 'admin-sidebar'}>
         <div className="admin-brand-wrap">
-          <div className="admin-brand-mark">L</div>
+          <img src={siteLogo} alt="LEVEL UP" className="admin-brand-logo" />
           <div>
             <span className="eyebrow">LEVEL UP</span>
             <strong>Admin Panel</strong>
@@ -2312,12 +2419,7 @@ export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
         <button
           type="button"
           className="admin-nav-item danger admin-logout-item"
-          onClick={() => {
-            window.localStorage.removeItem('levelup-auth-token')
-            window.localStorage.removeItem('levelup-user')
-            onLogout()
-            navigate('/admin/login', { replace: true })
-          }}
+          onClick={onLogout}
         >
           <LogOut size={18} />
           <span>Logout</span>

@@ -1,4 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@400;500;600;700&display=swap');
 
 :root {
   --font-primary: 'Josefin Sans', 'Segoe UI', Tahoma, sans-serif;
@@ -28,6 +27,8 @@
   --bg: var(--bg-primary);
   --text: var(--text-primary);
   --text-soft: var(--text-secondary);
+  /* used by AdminPanel.css; was previously undefined */
+  --muted: var(--text-muted);
 }
 
 :root[data-theme='dark'] {
@@ -89,11 +90,16 @@ button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 img, svg, video, canvas { max-width: 100%; height: auto; }
 #root { min-height: 100vh; }
-html, body, #root, .app-shell, .page-shell, main {
+/* Horizontal overflow is cut at the viewport (html) and clipped on the inner
+   wrappers with `clip`, which, unlike `hidden`, does not turn them into scroll
+   containers, so the sticky site header stays pinned to the window. */
+html {
   overflow-x: hidden;
 }
+body, #root, .app-shell, .page-shell, main {
+  overflow-x: clip;
+}
 body {
-  overflow-x: hidden;
   overscroll-behavior-x: none;
 }
 input::placeholder,
@@ -4883,5 +4889,38 @@ a, button, input, textarea, select {
 
   .profile-photo-box .btn {
     width: 100%;
+  }
+}
+
+/* ─── Audit fixes ──────────────────────────────────────────────────────────── */
+
+/* Dashboard top-bar icon buttons (theme toggle, notifications, mobile menu) were
+   white-on-white in the light theme. They now follow the theme tokens. */
+.dashboard-topbar .dashboard-mobile-toggle,
+.dashboard-topbar .dashboard-icon-btn {
+  color: var(--text-primary);
+  border-color: var(--border);
+  background: var(--surface-soft);
+}
+
+:root[data-theme='dark'] .dashboard-topbar .dashboard-mobile-toggle,
+:root[data-theme='dark'] .dashboard-topbar .dashboard-icon-btn {
+  color: #f2fff5;
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* The "LEVEL UP" label in the dashboard hero was dark green on dark green and
+   stretched to full width. */
+.dashboard-hero-copy .eyebrow {
+  align-self: flex-start;
+  color: #dff5e3;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* The sidebar is always visible on desktop, so its close button does nothing there. */
+@media (min-width: 981px) {
+  .dashboard-close-btn {
+    display: none;
   }
 }

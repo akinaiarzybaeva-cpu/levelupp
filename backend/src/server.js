@@ -11,6 +11,19 @@ import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail } from '.
 
 const app = express()
 
+// Render (and most PaaS hosts) put the app behind one reverse proxy. Without this,
+// express-rate-limit sees the proxy's IP for every visitor, so one person hitting the
+// login limit would lock out everyone.
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1))
+app.disable('x-powered-by')
+
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  next()
+})
+
 const allowedOrigins = new Set([
   config.frontendUrl,
   'http://127.0.0.1:5173',
@@ -36,14 +49,20 @@ app.use(cors({
       return
     }
 
-    callback(new Error('Origin is not allowed by CORS'))
+    // Disallowed origin: respond without CORS headers so the browser blocks it,
+    // instead of throwing (which produced an HTML 500 page).
+    callback(null, false)
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  // X-User-Email / X-User-Role are still accepted by CORS so older deployed frontends
+  // keep working during rollout, but the server NEVER uses them for authorization.
   allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Email', 'X-User-Role', 'X-Signature', 'X-Payment-Signature']
 }))
 
 app.use(express.json({
+  // Profile photos are sent as cropped 512px JPEG data URLs (~50–300 KB base64).
+  limit: '1mb',
   verify: (req, _res, buf) => {
     req.rawBody = buf.toString('utf8')
   }
@@ -61,10 +80,20 @@ const loginLimiter = rateLimit({
 // Rate limiter for password reset requests (5 req/hour per IP)
 const passwordResetLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 10,
+  // Forgot/reset requests per IP per hour (env override for operators and the test suite).
+  max: Math.max(1, Number(process.env.PASSWORD_RESET_RATE_LIMIT_MAX) || 10),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many password reset requests. Try again in an hour.' }
+})
+
+// Rate limiter for registration and account lookups (30 req/15min per IP)
+const accountLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again later.' }
 })
 
 // Rate limiter for general admin API (150 req/15min per IP)
@@ -152,6 +181,8 @@ const updateReviewStmt = db.prepare(`
   UPDATE reviews
   SET rating = @rating,
       text = @text,
+      user_name = @user_name,
+      user_avatar = @user_avatar,
       lesson_id = @lesson_id,
       lesson_label = @lesson_label,
       updated_at = @updated_at
@@ -251,8 +282,26 @@ function verifyPassword(password, passwordHash) {
   return bcrypt.compareSync(String(password ?? ''), String(passwordHash ?? ''))
 }
 
+// A valid bcrypt hash of a random value, compared against when the account does not
+// exist so that login takes the same time either way (no timing-based enumeration).
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 12)
+
+/** Non-blocking variant for the hot login path (runs bcrypt off the event loop). */
+async function verifyPasswordAsync(password, passwordHash) {
+  return bcrypt.compare(String(password ?? ''), String(passwordHash || DUMMY_PASSWORD_HASH))
+}
+
 function hashToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex')
+}
+
+/** Constant-time check of a raw reset token against its stored SHA-256 hash. */
+function resetTokenMatches(rawToken, storedHash) {
+  const stored = String(storedHash ?? '')
+  if (stored.startsWith('$2b$')) return bcrypt.compareSync(String(rawToken), stored)
+  const a = Buffer.from(hashToken(rawToken), 'hex')
+  const b = Buffer.from(stored, 'hex')
+  return a.length === b.length && crypto.timingSafeEqual(a, b)
 }
 
 function extractBearerToken(req) {
@@ -286,48 +335,55 @@ function createUserSession(userEmail, userAgent = '') {
   return { token, expiresAt }
 }
 
+const findActiveSessionStmt = db.prepare('SELECT user_email FROM user_sessions WHERE token_hash = ? AND revoked = 0 AND expires_at > ? LIMIT 1')
+
 function resolveSessionUserEmail(req) {
   const rawToken = extractBearerToken(req)
-  if (!rawToken) return null
+  // Tokens issued by createUserSession are 64 hex chars; reject anything else cheaply.
+  if (!rawToken || rawToken.length > 256) return null
 
-  const nowIso = new Date().toISOString()
-  const tokenHash = hashToken(rawToken)
-
-  // Fast O(1) indexed lookup via sha256
-  const session = db.prepare('SELECT user_email, expires_at, revoked FROM user_sessions WHERE token_hash = ? AND revoked = 0 AND expires_at > ? LIMIT 1').get(tokenHash, nowIso)
-  if (session) {
-    return String(session.user_email).trim().toLowerCase()
-  }
-
-  // Fallback for older bcrypt sessions during migration if any
-  const legacyRows = db.prepare("SELECT id, user_email, token_hash, expires_at FROM user_sessions WHERE revoked = 0 AND expires_at > ? AND token_hash LIKE '$2b$%'").all(nowIso)
-  for (const row of legacyRows) {
-    if (bcrypt.compareSync(rawToken, row.token_hash)) {
-      return String(row.user_email).trim().toLowerCase()
-    }
-  }
-
-  return null
+  // O(1) indexed lookup via sha256. (The old bcrypt-hashed "legacy" session fallback
+  // was removed: it ran a bcrypt compare per stored session on every request with an
+  // unknown token, which made unauthenticated requests a CPU denial-of-service vector.
+  // Users holding such a legacy token simply log in again.)
+  const session = findActiveSessionStmt.get(hashToken(rawToken), new Date().toISOString())
+  return session ? String(session.user_email).trim().toLowerCase() : null
 }
 
 function revokeTokenSession(token) {
   if (!token) return false
-  const nowIso = new Date().toISOString()
-  const tokenHash = hashToken(token)
+  const res = revokeUserSessionByTokenStmt.run({ token_hash: hashToken(token), updated_at: new Date().toISOString() })
+  return res.changes > 0
+}
 
-  const res = db.prepare('UPDATE user_sessions SET revoked = 1, updated_at = ? WHERE token_hash = ? AND revoked = 0').run(nowIso, tokenHash)
-  if (res.changes > 0) return true
+function isProfileBlocked(profile) {
+  return Boolean(profile?.is_blocked) || profile?.account_status === 'blocked'
+}
 
-  // Legacy fallback
-  const legacyRows = db.prepare("SELECT id, token_hash FROM user_sessions WHERE revoked = 0 AND token_hash LIKE '$2b$%'").all()
-  for (const row of legacyRows) {
-    if (bcrypt.compareSync(token, row.token_hash)) {
-      db.prepare('UPDATE user_sessions SET revoked = 1, updated_at = ? WHERE id = ?').run(nowIso, row.id)
-      return true
-    }
-  }
+const ALLOWED_ACCOUNT_STATUSES = new Set(['active', 'inactive', 'blocked'])
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const MIN_PASSWORD_LENGTH = 8
 
-  return false
+function clampText(value, maxLength) {
+  return String(value ?? '').trim().slice(0, maxLength)
+}
+
+/**
+ * Accepts only images we can safely render in <img src>: a base64 data URL of a
+ * common raster type (what the profile cropper produces) or an https URL.
+ */
+function sanitizeAvatarUrl(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+  if (/^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/.test(raw) && raw.length <= 900_000) return raw
+  if (/^https:\/\/[^\s"'<>]+$/.test(raw) && raw.length <= 2048) return raw
+  return null
+}
+
+function sendServerError(res, err, publicMessage) {
+  // eslint-disable-next-line no-console
+  console.error(`[API ERROR] ${publicMessage}:`, err)
+  res.status(500).json({ error: publicMessage })
 }
 
 /**
@@ -384,7 +440,7 @@ function requireAdminAuth(req, res, next) {
     return
   }
 
-  if (Boolean(profile.is_blocked) || profile.account_status === 'blocked') {
+  if (isProfileBlocked(profile)) {
     res.status(403).json({ error: 'Account is blocked.' })
     return
   }
@@ -400,20 +456,6 @@ function requireAdminAuth(req, res, next) {
   req.adminEmail = userEmail
   req.adminProfile = profile
   next()
-}
-
-function ensureAdminAccess(req) {
-  const userEmail = resolveAuthenticatedUserEmail(req)
-  if (!userEmail) return false
-
-  const profile = db.prepare('SELECT user_email, role, account_status, is_blocked FROM user_profiles WHERE user_email = ?').get(userEmail)
-  if (!profile) return false
-
-  const resolvedRole = normalizeRoleName(profile.role)
-  const isBlocked = Boolean(profile.account_status === 'blocked' || profile.is_blocked === 1)
-  if (isBlocked) return false
-
-  return resolvedRole === 'Admin' && userEmail === config.adminEmail
 }
 
 function getPublicUserRecord(profile) {
@@ -479,11 +521,15 @@ function ensureSingleAdmin() {
   const existingAdmin = getUserProfileStmt.get(adminEmail)
 
   if (existingAdmin) {
-    if (existingAdmin.role !== 'Admin') {
-      db.prepare('UPDATE user_profiles SET role = ?, updated_at = ? WHERE user_email = ?').run('Admin', new Date().toISOString(), adminEmail)
-    }
-    // Strictly demote any other account that may have been assigned Admin
-    db.prepare("UPDATE user_profiles SET role = 'User', updated_at = ? WHERE role = 'Admin' AND user_email != ?").run(new Date().toISOString(), adminEmail)
+    db.transaction(() => {
+      const nowIso = new Date().toISOString()
+      // Strictly demote any other account that may have been assigned Admin (first, so the
+      // single-admin unique index can never be violated), then assert the configured admin.
+      db.prepare("UPDATE user_profiles SET role = 'User', updated_at = ? WHERE role = 'Admin' AND user_email != ?").run(nowIso, adminEmail)
+      if (existingAdmin.role !== 'Admin') {
+        db.prepare('UPDATE user_profiles SET role = ?, updated_at = ? WHERE user_email = ?').run('Admin', nowIso, adminEmail)
+      }
+    })()
     return
   }
 
@@ -501,6 +547,7 @@ function ensureSingleAdmin() {
   }
 
   const nowIso = new Date().toISOString()
+  db.prepare("UPDATE user_profiles SET role = 'User', updated_at = ? WHERE role = 'Admin' AND user_email != ?").run(nowIso, adminEmail)
   upsertUserProfileStmt.run({
     user_email: adminEmail,
     first_name: 'Admin',
@@ -522,9 +569,12 @@ function ensureSingleAdmin() {
 }
 
 function ensureSeedUsers() {
+  // The demo account has a publicly known password, so it is only created when
+  // explicitly requested for local development (SEED_DEMO_USER=true).
+  // An already existing demo account is left untouched.
   const demoUser = { email: 'aisha@levelup.kg', firstName: 'Aisha', lastName: '', password: 'demo123', role: 'User' }
   const existingDemo = getUserProfileStmt.get(demoUser.email)
-  if (!existingDemo) {
+  if (process.env.SEED_DEMO_USER === 'true' && !existingDemo) {
     upsertUserProfileStmt.run({
       user_email: demoUser.email,
       first_name: demoUser.firstName,
@@ -542,6 +592,20 @@ function ensureSeedUsers() {
   }
 
   ensureSingleAdmin()
+  enforceSingleAdminIndex()
+}
+
+/**
+ * Database-level guarantee: at most ONE row may have role 'Admin'. Any attempt to create
+ * a second administrator (by any code path or direct SQL) fails with a constraint error.
+ */
+function enforceSingleAdminIndex() {
+  try {
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_single_admin ON user_profiles (role) WHERE role = 'Admin'")
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error('[ADMIN SETUP] Could not create the single-admin index:', error instanceof Error ? error.message : error)
+  }
 }
 
 // ─── Public API Endpoints ─────────────────────────────────────────────────────
@@ -614,14 +678,35 @@ app.get('/api/courses', (_req, res) => {
 
     res.json({ courses: result })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to fetch courses' })
+    sendServerError(res, err, 'Failed to fetch courses')
   }
 })
 
 // ─── Authentication Endpoints ─────────────────────────────────────────────────
 
-app.post('/api/auth/register', (req, res) => {
-  const name = String(req.body?.name ?? '').trim()
+async function notifyTelegramAboutRegistration({ name, email }) {
+  const { botToken, chatId } = config.telegram
+  if (!botToken || !chatId) return
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: `New LevelUp registration\nName: ${name}\nEmail: ${email}` }),
+      signal: AbortSignal.timeout(5000)
+    })
+    if (!response.ok) {
+      // eslint-disable-next-line no-console
+      console.warn(`[TELEGRAM] sendMessage failed with HTTP ${response.status}`)
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[TELEGRAM] notification failed:', err instanceof Error ? err.message : err)
+  }
+}
+
+app.post('/api/auth/register', accountLimiter, (req, res) => {
+  const name = clampText(req.body?.name, 100)
   const email = String(req.body?.email ?? '').trim().toLowerCase()
   const password = String(req.body?.password ?? '')
 
@@ -630,13 +715,18 @@ app.post('/api/auth/register', (req, res) => {
     return
   }
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (email.length > 254 || !EMAIL_PATTERN.test(email)) {
     res.status(400).json({ error: 'Email is invalid' })
     return
   }
 
-  if (password.length < 6) {
-    res.status(400).json({ error: 'Password must contain at least 6 characters' })
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    res.status(400).json({ error: `Password must contain at least ${MIN_PASSWORD_LENGTH} characters` })
+    return
+  }
+
+  if (password.length > 128) {
+    res.status(400).json({ error: 'Password is too long' })
     return
   }
 
@@ -693,30 +783,24 @@ app.post('/api/auth/register', (req, res) => {
       updatedAt: profile.updated_at
     }
   })
+
+  void notifyTelegramAboutRegistration({ name, email })
 })
 
-app.get('/api/auth/account-status', (req, res) => {
+// Used by the "Start learning" flow to decide between the login and register tabs.
+// Returns only whether the account exists (the frontend expects `{ exists }`); it no
+// longer exposes role or block status to unauthenticated callers.
+app.get('/api/auth/account-status', accountLimiter, (req, res) => {
   const email = String(req.query.email ?? '').trim().toLowerCase()
   if (!email) {
     res.status(400).json({ error: 'Email query parameter is required' })
     return
   }
 
-  const profile = getUserProfileStmt.get(email)
-  if (!profile) {
-    res.status(404).json({ error: 'User not found' })
-    return
-  }
-
-  res.json({
-    email: profile.user_email,
-    accountStatus: profile.account_status,
-    isBlocked: Boolean(profile.is_blocked),
-    role: profile.role
-  })
+  res.json({ exists: Boolean(getUserProfileStmt.get(email)) })
 })
 
-app.post('/api/auth/login', loginLimiter, (req, res) => {
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase()
   const password = String(req.body?.password ?? '')
 
@@ -726,12 +810,13 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
   }
 
   const profile = getUserProfileStmt.get(email)
-  if (!profile || !profile.password_hash || !verifyPassword(password, profile.password_hash)) {
+  const passwordMatches = await verifyPasswordAsync(password, profile?.password_hash)
+  if (!profile || !profile.password_hash || !passwordMatches) {
     res.status(401).json({ error: 'Invalid email or password' })
     return
   }
 
-  if (Boolean(profile.is_blocked) || profile.account_status === 'blocked') {
+  if (isProfileBlocked(profile)) {
     res.status(403).json({ error: 'This account has been suspended. Contact support.' })
     return
   }
@@ -759,7 +844,7 @@ app.get('/api/auth/session', (req, res) => {
     return
   }
 
-  if (Boolean(profile.is_blocked) || profile.account_status === 'blocked') {
+  if (isProfileBlocked(profile)) {
     res.status(403).json({ error: 'Account has been suspended' })
     return
   }
@@ -781,7 +866,7 @@ app.post('/api/auth/logout', (req, res) => {
 
 // ─── ADMIN: Dashboard & Stats ─────────────────────────────────────────────────
 
-app.get('/api/admin/overview', requireAdminAuth, (_req, res) => {
+app.get('/api/admin/overview', adminApiLimiter, requireAdminAuth, (_req, res) => {
   const totalUsersRow = db.prepare('SELECT COUNT(*) AS count FROM user_profiles').get()
   const newUsersRow = db.prepare("SELECT COUNT(*) AS count FROM user_profiles WHERE datetime(created_at) >= datetime('now', '-30 days')").get()
   const activeStudentsRow = db.prepare("SELECT COUNT(*) AS count FROM user_profiles WHERE account_status = 'active' AND is_blocked = 0 AND (role = 'Student' OR role = 'User')").get()
@@ -944,26 +1029,39 @@ app.patch('/api/admin/users/:userEmail', adminApiLimiter, requireAdminAuth, (req
     }
   }
 
-  const firstName = typeof req.body?.firstName === 'string' ? req.body.firstName.trim() : current.first_name
-  const lastName = typeof req.body?.lastName === 'string' ? req.body.lastName.trim() : current.last_name
-  const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : current.phone
-  const bio = typeof req.body?.bio === 'string' ? req.body.bio.trim() : current.bio
+  const firstName = typeof req.body?.firstName === 'string' ? clampText(req.body.firstName, 100) : current.first_name
+  const lastName = typeof req.body?.lastName === 'string' ? clampText(req.body.lastName, 100) : current.last_name
+  const phone = typeof req.body?.phone === 'string' ? clampText(req.body.phone, 40) : current.phone
+  const bio = typeof req.body?.bio === 'string' ? clampText(req.body.bio, 1000) : current.bio
 
-  // Only the single admin account can have role 'Admin'
+  // Only the single admin account can have role 'Admin', and the admin's own role is fixed.
   let nextRole = current.role
-  if (typeof req.body?.role === 'string') {
+  if (typeof req.body?.role === 'string' && userEmail !== config.adminEmail) {
     const requested = normalizeRoleName(req.body.role)
-    nextRole = (requested === 'Admin' && userEmail !== config.adminEmail) ? 'User' : requested
+    nextRole = requested === 'Admin' ? 'User' : requested
   }
 
   let nextStatus = current.account_status
   if (typeof req.body?.accountStatus === 'string') {
-    nextStatus = req.body.accountStatus.trim() || 'active'
+    const requestedStatus = req.body.accountStatus.trim().toLowerCase() || 'active'
+    if (!ALLOWED_ACCOUNT_STATUSES.has(requestedStatus)) {
+      res.status(400).json({ error: 'Invalid account status. Use "active", "inactive" or "blocked".' })
+      return
+    }
+    nextStatus = requestedStatus
   }
 
+  // `is_blocked` and `account_status` must agree. Previously the edit form could send
+  // accountStatus 'active' together with a stale isBlocked=true, leaving the user locked
+  // out while the admin UI showed them as active.
   let nextBlocked = current.is_blocked
   if (req.body?.isBlocked !== undefined) {
     nextBlocked = req.body.isBlocked ? 1 : 0
+  }
+  if (typeof req.body?.accountStatus === 'string') {
+    nextBlocked = nextStatus === 'blocked' ? 1 : 0
+  } else if (req.body?.isBlocked !== undefined) {
+    nextStatus = nextBlocked ? 'blocked' : (current.account_status === 'blocked' ? 'active' : current.account_status)
   }
 
   const nowIso = new Date().toISOString()
@@ -1010,6 +1108,10 @@ app.delete('/api/admin/users/:userEmail', adminApiLimiter, requireAdminAuth, (re
     db.prepare('DELETE FROM user_subscriptions WHERE user_email = ?').run(userEmail)
     db.prepare('DELETE FROM course_progress WHERE user_email = ?').run(userEmail)
     db.prepare('DELETE FROM user_notification_settings WHERE user_email = ?').run(userEmail)
+    db.prepare('DELETE FROM password_reset_tokens WHERE user_email = ?').run(userEmail)
+    // Reviews carry the user's email and name; remove them with the account.
+    db.prepare('DELETE FROM reviews WHERE user_email = ?').run(userEmail)
+    // payment_orders / payments are kept intentionally as financial records.
   })
 
   deleteTx()
@@ -1059,7 +1161,7 @@ app.get('/api/admin/courses', adminApiLimiter, requireAdminAuth, (_req, res) => 
 
     res.json({ courses: result })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to fetch admin courses' })
+    sendServerError(res, err, 'Failed to fetch admin courses')
   }
 })
 
@@ -1132,7 +1234,7 @@ app.post('/api/admin/courses', adminApiLimiter, requireAdminAuth, (req, res) => 
     const created = db.prepare('SELECT * FROM courses WHERE id = ?').get(id)
     res.status(201).json({ ok: true, course: created })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to create course' })
+    sendServerError(res, err, 'Failed to create course')
   }
 })
 
@@ -1201,7 +1303,7 @@ app.put('/api/admin/courses/:courseId', adminApiLimiter, requireAdminAuth, (req,
     const updated = db.prepare('SELECT * FROM courses WHERE id = ?').get(courseId)
     res.json({ ok: true, course: updated })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to update course' })
+    sendServerError(res, err, 'Failed to update course')
   }
 })
 
@@ -1223,7 +1325,7 @@ app.delete('/api/admin/courses/:courseId', adminApiLimiter, requireAdminAuth, (r
     deleteTx()
     res.json({ ok: true })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to delete course' })
+    sendServerError(res, err, 'Failed to delete course')
   }
 })
 
@@ -1245,7 +1347,7 @@ app.patch('/api/admin/courses/:courseId/publish', adminApiLimiter, requireAdminA
 
     res.json({ ok: true, courseId, isPublished: Boolean(nextPublished) })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to toggle publication' })
+    sendServerError(res, err, 'Failed to toggle publication')
   }
 })
 
@@ -1286,7 +1388,7 @@ app.get('/api/admin/lessons', adminApiLimiter, requireAdminAuth, (req, res) => {
 
     res.json({ lessons })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to fetch lessons' })
+    sendServerError(res, err, 'Failed to fetch lessons')
   }
 })
 
@@ -1366,7 +1468,7 @@ app.post('/api/admin/lessons', adminApiLimiter, requireAdminAuth, (req, res) => 
     const created = db.prepare('SELECT * FROM lessons WHERE id = ?').get(id)
     res.status(201).json({ ok: true, lesson: created })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to create lesson' })
+    sendServerError(res, err, 'Failed to create lesson')
   }
 })
 
@@ -1380,6 +1482,10 @@ app.put('/api/admin/lessons/:lessonId', adminApiLimiter, requireAdminAuth, (req,
     }
 
     const courseId = String(req.body?.courseId ?? existing.course_id).trim()
+    if (courseId !== existing.course_id && !db.prepare('SELECT id FROM courses WHERE id = ?').get(courseId)) {
+      res.status(404).json({ error: 'Course does not exist' })
+      return
+    }
     const titleRu = typeof req.body?.title_ru === 'string' ? req.body.title_ru.trim() : existing.title_ru
     const titleKg = typeof req.body?.title_kg === 'string' ? req.body.title_kg.trim() : existing.title_kg
     const titleEn = typeof req.body?.title_en === 'string' ? req.body.title_en.trim() : existing.title_en
@@ -1424,7 +1530,7 @@ app.put('/api/admin/lessons/:lessonId', adminApiLimiter, requireAdminAuth, (req,
     const updated = db.prepare('SELECT * FROM lessons WHERE id = ?').get(lessonId)
     res.json({ ok: true, lesson: updated })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to update lesson' })
+    sendServerError(res, err, 'Failed to update lesson')
   }
 })
 
@@ -1448,7 +1554,7 @@ app.delete('/api/admin/lessons/:lessonId', adminApiLimiter, requireAdminAuth, (r
 
     res.json({ ok: true })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to delete lesson' })
+    sendServerError(res, err, 'Failed to delete lesson')
   }
 })
 
@@ -1484,7 +1590,7 @@ app.patch('/api/admin/lessons/:lessonId/order', adminApiLimiter, requireAdminAut
 
     res.json({ ok: true })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to reorder lesson' })
+    sendServerError(res, err, 'Failed to reorder lesson')
   }
 })
 
@@ -1534,7 +1640,7 @@ app.get('/api/admin/ai-pro', adminApiLimiter, requireAdminAuth, (_req, res) => {
       users: userRecords
     })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to fetch AI Pro data' })
+    sendServerError(res, err, 'Failed to fetch AI Pro data')
   }
 })
 
@@ -1550,7 +1656,7 @@ app.patch('/api/admin/ai-pro/system', adminApiLimiter, requireAdminAuth, (req, r
 
     res.json({ ok: true, systemEnabled: enabled })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to update system setting' })
+    sendServerError(res, err, 'Failed to update system setting')
   }
 })
 
@@ -1558,7 +1664,7 @@ app.post('/api/admin/ai-pro/user', adminApiLimiter, requireAdminAuth, (req, res)
   try {
     const userEmail = String(req.body?.userEmail ?? '').trim().toLowerCase()
     const action = String(req.body?.action ?? 'activate').trim() // 'activate' | 'deactivate'
-    const days = Math.max(1, Number(req.body?.days ?? 30))
+    const days = Math.max(1, Math.floor(Number(req.body?.days ?? 30)) || 30)
 
     const profile = getUserProfileStmt.get(userEmail)
     if (!profile) {
@@ -1569,7 +1675,11 @@ app.post('/api/admin/ai-pro/user', adminApiLimiter, requireAdminAuth, (req, res)
     const nowIso = new Date().toISOString()
 
     if (action === 'activate') {
-      const endsAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
+      // "+30 days" on an already active AI Pro grant extends it from its current end date.
+      const current = findSubscriptionStmt.get(userEmail)
+      const currentEndMs = current && current.plan_id === 'aipro' && current.status === 'active' ? new Date(current.ends_at).getTime() : NaN
+      const baseMs = Number.isFinite(currentEndMs) && currentEndMs > Date.now() ? currentEndMs : Date.now()
+      const endsAt = new Date(baseMs + Math.min(days, 3650) * 24 * 60 * 60 * 1000).toISOString()
       upsertSubscriptionStmt.run({
         user_email: userEmail,
         plan_id: 'aipro',
@@ -1595,7 +1705,7 @@ app.post('/api/admin/ai-pro/user', adminApiLimiter, requireAdminAuth, (req, res)
 
     res.status(400).json({ error: 'Invalid action. Use "activate" or "deactivate".' })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Operation failed' })
+    sendServerError(res, err, 'Operation failed')
   }
 })
 
@@ -1616,8 +1726,14 @@ app.post('/api/ai/chat', async (req, res) => {
       return
     }
 
+    const profile = getUserProfileStmt.get(userEmail)
+    if (!profile || isProfileBlocked(profile)) {
+      res.status(403).json({ error: 'Account is not allowed to use this feature.' })
+      return
+    }
+
     // Check authorization: Must be the administrator OR have an active AI Pro subscription
-    const isAdmin = userEmail === config.adminEmail
+    const isAdmin = userEmail === config.adminEmail && normalizeRoleName(profile.role) === 'Admin'
     const nowIso = new Date().toISOString()
     const activeSub = db.prepare("SELECT * FROM user_subscriptions WHERE user_email = ? AND plan_id = 'aipro' AND status = 'active' AND datetime(ends_at) > datetime(?)").get(userEmail, nowIso)
 
@@ -1626,8 +1742,8 @@ app.post('/api/ai/chat', async (req, res) => {
       return
     }
 
-    const question = String(req.body?.question ?? '').trim()
-    const topic = String(req.body?.topic ?? 'General Programming').trim()
+    const question = clampText(req.body?.question, 4000)
+    const topic = clampText(req.body?.topic ?? 'General Programming', 100)
     const language = String(req.body?.language ?? 'ru').trim().toLowerCase()
 
     if (!question) {
@@ -1638,7 +1754,7 @@ app.post('/api/ai/chat', async (req, res) => {
     // Provide intelligent educational assistant reply
     let answer = ''
     if (language === 'kg') {
-      answer = `[AI Pro Көмекші]: "${topic}" темасы боюнча сурооңузга жооп:\n\n`
+      answer = `[AI Pro Жардамчы]: "${topic}" темасы боюнча сурооңузга жооп:\n\n`
         + `Сиздин сурооңуз: "${question}"\n\n`
         + `Негизги түшүндүрмө:\n`
         + `1. Бул багытта эң маанилүү нерсе — базалык концепцияларды терең түшүнүү жана практика жүзүндө колдонуу.\n`
@@ -1665,7 +1781,7 @@ app.post('/api/ai/chat', async (req, res) => {
 
     res.json({ ok: true, answer })
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'AI service error' })
+    sendServerError(res, err, 'AI service error')
   }
 })
 
@@ -1899,9 +2015,24 @@ app.put('/api/admin/settings/password', adminApiLimiter, requireAdminAuth, async
     return
   }
 
+  if (nextPassword.length > 128) {
+    res.status(400).json({ error: 'New password must be at most 128 characters' })
+    return
+  }
+
+  if (!/[A-Za-zА-Яа-яЁё]/.test(nextPassword) || !/\d/.test(nextPassword)) {
+    res.status(400).json({ error: 'New password must contain both letters and digits' })
+    return
+  }
+
   const profile = getUserProfileStmt.get(userEmail)
   if (!profile || !profile.password_hash || !verifyPassword(currentPassword, profile.password_hash)) {
     res.status(400).json({ error: 'Current password is incorrect' })
+    return
+  }
+
+  if (verifyPassword(nextPassword, profile.password_hash)) {
+    res.status(400).json({ error: 'New password must be different from the current password' })
     return
   }
 
@@ -1930,7 +2061,7 @@ app.put('/api/admin/settings/password', adminApiLimiter, requireAdminAuth, async
   void sendEmail({
     to: userEmail,
     subject: 'Your LEVEL UP admin password was changed',
-    ...buildPasswordChangedEmail({ appName: 'LEVEL UP' })
+    ...buildPasswordChangedEmail({ appName: 'LEVEL UP', isAdmin: true })
   }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('Failed to send password-changed email:', err)
@@ -1941,11 +2072,14 @@ app.put('/api/admin/settings/password', adminApiLimiter, requireAdminAuth, async
 
 // ─── Public Reviews Endpoints ─────────────────────────────────────────────────
 
-app.get('/api/reviews', (_req, res) => {
+app.get('/api/reviews', (req, res) => {
+  // Reviewer emails are never sent to the public. When the caller is logged in we
+  // flag their own review with `isOwn` so the UI can offer "Edit".
+  const viewerEmail = resolveAuthenticatedUserEmail(req)
   const rows = listReviewsStmt.all()
   const reviews = rows.map((row) => ({
     id: row.id,
-    userId: row.user_email,
+    isOwn: Boolean(viewerEmail && row.user_email === viewerEmail),
     name: row.user_name,
     avatar: row.user_avatar,
     lessonId: row.lesson_id,
@@ -1967,14 +2101,22 @@ app.post('/api/reviews', (req, res) => {
     return
   }
 
-  const userName = String(req.body?.userName ?? '').trim()
-  const userAvatar = String(req.body?.userAvatar ?? '').trim().slice(0, 2).toUpperCase() || 'U'
-  const lessonId = String(req.body?.lessonId ?? '').trim()
-  const lessonLabel = String(req.body?.lessonLabel ?? '').trim()
-  const text = String(req.body?.text ?? '').trim()
+  const profile = getUserProfileStmt.get(userEmail)
+  if (!profile || isProfileBlocked(profile)) {
+    res.status(403).json({ error: 'Account is not allowed to post reviews' })
+    return
+  }
+
+  // Display name/initial come from the stored profile, not from the request body,
+  // so a user cannot post reviews under someone else's name.
+  const userName = `${profile.first_name ?? ''} ${profile.last_name ?? ''}`.trim() || 'Student'
+  const userAvatar = userName.charAt(0).toUpperCase() || 'U'
+  const lessonId = clampText(req.body?.lessonId, 120)
+  const lessonLabel = clampText(req.body?.lessonLabel, 300)
+  const text = clampText(req.body?.text, 2000)
   const rating = Number(req.body?.rating)
 
-  if (!userName || !lessonId || !lessonLabel || !text) {
+  if (!lessonId || !lessonLabel || !text) {
     res.status(400).json({ error: 'Review fields are required' })
     return
   }
@@ -1991,6 +2133,8 @@ app.post('/api/reviews', (req, res) => {
     const updateResult = updateReviewStmt.run({
       id: existingReview.id,
       user_email: userEmail,
+      user_name: userName,
+      user_avatar: userAvatar,
       rating,
       text,
       lesson_id: lessonId,
@@ -2081,8 +2225,9 @@ app.post('/api/payments/orders', async (req, res) => {
       status: providerOrder.status
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Payment provider is unavailable'
-    res.status(502).json({ error: message })
+    // eslint-disable-next-line no-console
+    console.error('[PAYMENTS] order creation failed:', error)
+    res.status(502).json({ error: 'Payment provider is unavailable. Please try again later.' })
   }
 })
 
@@ -2095,11 +2240,14 @@ app.get('/api/payments/orders/:orderId', (req, res) => {
     return
   }
 
+  // Only the authenticated session counts. (Previously an unauthenticated
+  // `X-User-Email` header was accepted here, letting anyone read any order.)
   const sessionEmail = resolveAuthenticatedUserEmail(req)
-  const headerEmail = String(req.headers['x-user-email'] ?? '').trim().toLowerCase()
-  const orderEmail = String(order.user_email).toLowerCase()
-
-  if (sessionEmail !== orderEmail && headerEmail !== orderEmail) {
+  if (!sessionEmail) {
+    res.status(401).json({ error: 'Authentication required' })
+    return
+  }
+  if (sessionEmail !== String(order.user_email).toLowerCase()) {
     res.status(403).json({ error: 'Forbidden' })
     return
   }
@@ -2121,9 +2269,12 @@ app.get('/api/payments/orders/:orderId', (req, res) => {
 app.get('/api/subscription/:userEmail', (req, res) => {
   const userEmail = String(req.params.userEmail ?? '').trim().toLowerCase()
   const sessionEmail = resolveAuthenticatedUserEmail(req)
-  const headerEmail = String(req.headers['x-user-email'] ?? '').trim().toLowerCase()
 
-  if (sessionEmail !== userEmail && headerEmail !== userEmail) {
+  if (!sessionEmail) {
+    res.status(401).json({ error: 'Authentication required' })
+    return
+  }
+  if (sessionEmail !== userEmail) {
     res.status(403).json({ error: 'Forbidden' })
     return
   }
@@ -2248,7 +2399,7 @@ app.post('/api/payments/webhook/:provider', (req, res) => {
       return
     }
 
-    res.status(500).json({ error: message })
+    sendServerError(res, error, 'Failed to activate subscription')
   }
 })
 
@@ -2299,10 +2450,20 @@ app.post('/api/course-progress', (req, res) => {
     return
   }
 
+  // Use the real lesson count from the database rather than trusting the client,
+  // so progress/completion statistics cannot be inflated with arbitrary numbers.
+  const course = db.prepare('SELECT id FROM courses WHERE id = ?').get(courseId)
+  if (!course) {
+    res.status(404).json({ error: 'Course not found' })
+    return
+  }
+  const lessonCountRow = db.prepare('SELECT COUNT(*) AS count FROM lessons WHERE course_id = ? AND is_published = 1').get(courseId)
+  const totalLessons = Number(lessonCountRow?.count ?? 0)
+
   const nowIso = new Date().toISOString()
-  const totalLessons = Number(req.body?.totalLessons ?? 0)
-  const completedLessons = Math.max(0, Number(req.body?.completedLessons ?? 0))
-  const lessonsStarted = Math.max(0, Number(req.body?.lessonsStarted ?? completedLessons))
+  const toCount = (value) => Math.min(totalLessons, Math.max(0, Math.floor(Number(value) || 0)))
+  const completedLessons = toCount(req.body?.completedLessons ?? 0)
+  const lessonsStarted = toCount(req.body?.lessonsStarted ?? completedLessons)
 
   const existing = db.prepare('SELECT * FROM course_progress WHERE user_email = ? AND course_id = ?').get(userEmail, courseId)
 
@@ -2330,9 +2491,12 @@ app.post('/api/course-progress', (req, res) => {
 app.get('/api/users/:userEmail', (req, res) => {
   const userEmail = String(req.params.userEmail ?? '').trim().toLowerCase()
   const sessionEmail = resolveAuthenticatedUserEmail(req)
-  const headerEmail = String(req.headers['x-user-email'] ?? '').trim().toLowerCase()
 
-  if (sessionEmail !== userEmail && headerEmail !== userEmail) {
+  if (!sessionEmail) {
+    res.status(401).json({ error: 'Authentication required' })
+    return
+  }
+  if (sessionEmail !== userEmail) {
     res.status(403).json({ error: 'Forbidden' })
     return
   }
@@ -2377,12 +2541,22 @@ app.put('/api/users/:userEmail/profile', (req, res) => {
   }
 
   const payload = req.body ?? {}
-  const firstName = String(payload.firstName ?? payload.first_name ?? profile.first_name).trim()
-  const lastName = String(payload.lastName ?? payload.last_name ?? profile.last_name).trim()
-  const phone = String(payload.phone ?? profile.phone ?? '').trim()
-  const bio = String(payload.bio ?? profile.bio ?? '').trim()
-  const avatarUrl = String(payload.avatarUrl ?? payload.avatar_url ?? payload.profileImage ?? profile.avatar_url ?? '').trim()
+  const firstName = clampText(payload.firstName ?? payload.first_name ?? profile.first_name, 100)
+  const lastName = clampText(payload.lastName ?? payload.last_name ?? profile.last_name, 100)
+  const phone = clampText(payload.phone ?? profile.phone ?? '', 40)
+  const bio = clampText(payload.bio ?? profile.bio ?? '', 1000)
+  const avatarUrl = sanitizeAvatarUrl(payload.avatarUrl ?? payload.avatar_url ?? payload.profileImage ?? profile.avatar_url ?? '')
   const nowIso = new Date().toISOString()
+
+  if (!firstName) {
+    res.status(400).json({ error: 'First name is required' })
+    return
+  }
+
+  if (avatarUrl === null) {
+    res.status(400).json({ error: 'Profile photo must be a JPG, PNG or WEBP image under ~650 KB, or an https URL' })
+    return
+  }
 
   // Crucial security check: User cannot change their own role! Role is preserved from DB!
   upsertUserProfileStmt.run({
@@ -2425,8 +2599,8 @@ app.put('/api/users/:userEmail/password', (req, res) => {
     return
   }
 
-  if (nextPassword.length < 8) {
-    res.status(400).json({ error: 'Password must be at least 8 characters' })
+  if (nextPassword.length < MIN_PASSWORD_LENGTH || nextPassword.length > 128) {
+    res.status(400).json({ error: `Password must be ${MIN_PASSWORD_LENGTH}–128 characters` })
     return
   }
 
@@ -2497,32 +2671,28 @@ app.put('/api/users/:userEmail/notifications', (req, res) => {
   })
 })
 
-// ─── FORGOT & RESET PASSWORD (Strictly for Administrator) ─────────────────────
+// ─── FORGOT & RESET PASSWORD (administrator and regular users) ────────────────
 
 app.post('/api/auth/forgot-password', passwordResetLimiter, async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase()
 
-  // Always return 200 generic message to avoid email enumeration
-  const genericResponse = { ok: true, message: 'If this email belongs to an administrator, a password reset link has been sent.' }
+  // Always return the same generic 200 response to avoid email enumeration
+  const genericResponse = { ok: true, message: 'If an account exists for this email, a password reset link has been sent.' }
 
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    res.json(genericResponse)
-    return
-  }
-
-  // Only the designated single administrator email is eligible
-  if (email !== config.adminEmail) {
+  if (!email || !EMAIL_PATTERN.test(email)) {
     res.json(genericResponse)
     return
   }
 
   const profile = getUserProfileStmt.get(email)
-  if (!profile || profile.role !== 'Admin') {
+  if (!profile || !profile.password_hash || isProfileBlocked(profile)) {
     res.json(genericResponse)
     return
   }
 
-  // Invalidate any existing unused reset tokens for this admin
+  const isAdminAccount = email === config.adminEmail && normalizeRoleName(profile.role) === 'Admin'
+
+  // Invalidate any existing unused reset tokens for this account
   db.prepare('UPDATE password_reset_tokens SET used = 1 WHERE user_email = ? AND used = 0').run(email)
 
   // Generate cryptographically secure random token (48 bytes = 96 hex chars)
@@ -2537,12 +2707,13 @@ app.post('/api/auth/forgot-password', passwordResetLimiter, async (req, res) => 
   `).run(tokenId, email, tokenHash, expiresAt, new Date().toISOString())
 
   const frontendUrl = config.frontendUrl
-  const resetUrl = `${frontendUrl}/admin/reset-password?token=${encodeURIComponent(rawToken)}&id=${encodeURIComponent(tokenId)}`
+  const resetPath = isAdminAccount ? '/admin/reset-password' : '/reset-password'
+  const resetUrl = `${frontendUrl}${resetPath}?token=${encodeURIComponent(rawToken)}&id=${encodeURIComponent(tokenId)}`
 
-  const emailContent = buildPasswordResetEmail({ resetUrl, expiresMinutes: 30 })
+  const emailContent = buildPasswordResetEmail({ resetUrl, expiresMinutes: 30, isAdmin: isAdminAccount })
   const emailSent = await sendEmail({
     to: email,
-    subject: 'LEVEL UP Admin — Password Reset Request',
+    subject: isAdminAccount ? 'LEVEL UP Admin — Password Reset Request' : 'LEVEL UP — Password Reset Request',
     ...emailContent
   }).catch((err) => {
     // eslint-disable-next-line no-console
@@ -2551,9 +2722,10 @@ app.post('/api/auth/forgot-password', passwordResetLimiter, async (req, res) => 
   })
 
   if (!emailSent) {
-    // Email not configured — log the token URL so developer/admin can use it locally
+    // Email (SMTP) not configured: fall back to the server log so the operator can
+    // retrieve the link. The console is only visible to whoever runs the server.
     // eslint-disable-next-line no-console
-    console.log(`\n=======================================================\n[ADMIN RESET LINK]: ${resetUrl}\n=======================================================\n`)
+    console.log(`\n=======================================================\n[PASSWORD RESET LINK for ${email}]: ${resetUrl}\n=======================================================\n`)
   }
 
   res.json(genericResponse)
@@ -2580,9 +2752,7 @@ app.get('/api/auth/reset-password/verify', (req, res) => {
     return
   }
 
-  const tokenHash = hashToken(rawToken)
-  const isValid = (tokenHash === record.token_hash) || (record.token_hash.startsWith('$2b$') && bcrypt.compareSync(rawToken, record.token_hash))
-  if (!isValid) {
+  if (!resetTokenMatches(rawToken, record.token_hash)) {
     res.status(400).json({ valid: false, error: 'Invalid reset link.' })
     return
   }
@@ -2601,8 +2771,8 @@ app.post('/api/auth/reset-password', passwordResetLimiter, (req, res) => {
     return
   }
 
-  if (newPassword.length < 8) {
-    res.status(400).json({ error: 'Password must be at least 8 characters.' })
+  if (newPassword.length < MIN_PASSWORD_LENGTH || newPassword.length > 128) {
+    res.status(400).json({ error: `Password must be ${MIN_PASSWORD_LENGTH}–128 characters.` })
     return
   }
 
@@ -2628,64 +2798,86 @@ app.post('/api/auth/reset-password', passwordResetLimiter, (req, res) => {
     return
   }
 
-  const tokenHash = hashToken(rawToken)
-  const tokenValid = (tokenHash === record.token_hash) || (record.token_hash.startsWith('$2b$') && bcrypt.compareSync(rawToken, record.token_hash))
-  if (!tokenValid) {
+  if (!resetTokenMatches(rawToken, record.token_hash)) {
     res.status(400).json({ error: 'Invalid reset token.' })
     return
   }
 
   const userEmail = String(record.user_email).trim().toLowerCase()
-  if (userEmail !== config.adminEmail) {
-    res.status(403).json({ error: 'Forbidden.' })
-    return
-  }
-
   const profile = getUserProfileStmt.get(userEmail)
   if (!profile) {
     res.status(400).json({ error: 'Account not found.' })
     return
   }
 
+  if (isProfileBlocked(profile)) {
+    res.status(403).json({ error: 'This account has been suspended. Contact support.' })
+    return
+  }
+
+  const isAdminAccount = userEmail === config.adminEmail && normalizeRoleName(profile.role) === 'Admin'
   const nowIso = new Date().toISOString()
   const hashedNext = hashPassword(newPassword)
 
-  // Mark token as used (single-use guarantee)
-  db.prepare('UPDATE password_reset_tokens SET used = 1 WHERE id = ?').run(tokenId)
-
-  // Update password in DB
-  upsertUserProfileStmt.run({
-    user_email: userEmail,
-    first_name: profile.first_name ?? 'Admin',
-    last_name: profile.last_name ?? '',
-    phone: profile.phone ?? null,
-    bio: profile.bio ?? '',
-    avatar_url: profile.avatar_url ?? null,
-    role: 'Admin',
-    account_status: 'active',
-    is_blocked: 0,
-    password_hash: hashedNext,
-    created_at: profile.created_at,
-    updated_at: nowIso
-  })
-
-  // Invalidate all existing sessions
-  db.prepare('UPDATE user_sessions SET revoked = 1, updated_at = ? WHERE user_email = ? AND revoked = 0').run(nowIso, userEmail)
+  // Single transaction: mark token used (single-use guarantee), update only the
+  // password hash (role/status are left exactly as they were), revoke sessions.
+  const consumed = db.transaction(() => {
+    const claim = db.prepare('UPDATE password_reset_tokens SET used = 1 WHERE id = ? AND used = 0').run(tokenId)
+    if (claim.changes !== 1) return false
+    db.prepare('UPDATE user_profiles SET password_hash = ?, updated_at = ? WHERE user_email = ?').run(hashedNext, nowIso, userEmail)
+    db.prepare('UPDATE user_sessions SET revoked = 1, updated_at = ? WHERE user_email = ? AND revoked = 0').run(nowIso, userEmail)
+    return true
+  })()
+  if (!consumed) {
+    res.status(400).json({ error: 'This reset link has already been used.' })
+    return
+  }
 
   // Send confirmation email (non-blocking)
   void sendEmail({
     to: userEmail,
-    subject: 'Your LEVEL UP admin password was changed',
-    ...buildPasswordChangedEmail({ appName: 'LEVEL UP' })
+    subject: isAdminAccount ? 'Your LEVEL UP admin password was changed' : 'Your LEVEL UP password was changed',
+    ...buildPasswordChangedEmail({ appName: 'LEVEL UP', isAdmin: isAdminAccount })
   }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('Failed to send password-changed confirmation email:', err)
   })
 
-  res.json({ ok: true, message: 'Password reset successfully. Please log in with your new password.' })
+  res.json({ ok: true, isAdmin: isAdminAccount, message: 'Password reset successfully. Please log in with your new password.' })
+})
+
+// ─── Fallbacks: unknown API routes & error handler (always JSON) ─────────────
+
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' })
+})
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, _req, res, _next) => {
+  if (err?.type === 'entity.too.large') {
+    res.status(413).json({ error: 'Request body is too large' })
+    return
+  }
+  if (err?.type === 'entity.parse.failed') {
+    res.status(400).json({ error: 'Malformed JSON body' })
+    return
+  }
+  sendServerError(res, err, 'Internal server error')
 })
 
 // ─── Initialize Seed Data & Start Server ──────────────────────────────────────
+
+// Housekeeping: drop expired/revoked sessions and stale reset tokens so these
+// tables do not grow forever. Only rows that can never be used again are removed.
+function pruneExpiredAuthRows() {
+  const nowIso = new Date().toISOString()
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+  db.prepare('DELETE FROM user_sessions WHERE expires_at < ? OR (revoked = 1 AND updated_at < ?)').run(nowIso, weekAgo)
+  db.prepare('DELETE FROM password_reset_tokens WHERE expires_at < ?').run(weekAgo)
+}
+
+pruneExpiredAuthRows()
+setInterval(pruneExpiredAuthRows, 6 * 60 * 60 * 1000).unref()
 
 ensureSeedUsers()
 

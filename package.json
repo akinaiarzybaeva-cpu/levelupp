@@ -11,7 +11,9 @@
     "backend:start": "npm --prefix backend run start",
     "build": "npm --prefix frontend run build",
     "lint": "npm --prefix frontend run lint",
-    "preview": "npm --prefix frontend run preview"
+    "preview": "npm --prefix frontend run preview",
+    "test:api": "node scripts/test_admin_suite.mjs",
+    "test": "node scripts/test_admin_suite.mjs"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
