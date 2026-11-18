@@ -174,6 +174,17 @@ try {
   const up = await waitFor(() => serverLog.includes('running on port'), 15000)
   if (!up) throw new Error(`Backend did not start:\n${serverLog}`)
 
+  // ── CORS ──────────────────────────────────────────────────────────────────────
+  const preflight = async (origin) => (await fetch(`${BASE}/api/auth/register`, { method: 'OPTIONS', headers: { Origin: origin, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type' } })).headers.get('access-control-allow-origin')
+  await check('CORS allows the site and its Vercel preview deployments', async () => {
+    const allowed = await Promise.all(['http://localhost:5173', 'https://levelupp-cyan.vercel.app', 'https://levelupp-git-master-team.vercel.app'].map(preflight))
+    return allowed.every(Boolean) || JSON.stringify(allowed)
+  })
+  await check('CORS refuses foreign origins', async () => {
+    const refused = await Promise.all(['https://evil.example', 'https://evil.vercel.app', 'https://levelupp.vercel.app.evil.com'].map(preflight))
+    return refused.every((r) => !r) || JSON.stringify(refused)
+  })
+
   // ── Public endpoints ────────────────────────────────────────────────────────
   await check('Health endpoint responds', async () => (await request('/api/health')).data.status === 'ok')
   await check('Course catalog is seeded (8 courses, 160 lessons)', async () => {
@@ -387,10 +398,11 @@ try {
     await request(`/api/admin/subscriptions/${userA.email}`, { method: 'PATCH', token: adminToken, body: { action: 'revoke' } })
     return (await request(`/api/subscription/${userA.email}`, { token: tokenA })).data.status === 'expired'
   })
-  await check('Admin grants AI Pro -> AI chat works', async () => {
+  // No ANTHROPIC_API_KEY in this suite: access checks pass, then the server reports the missing AI configuration.
+  await check('Admin grants AI Pro -> AI chat passes access checks (503 AI_NOT_CONFIGURED without a key)', async () => {
     await request('/api/admin/ai-pro/user', { method: 'POST', token: adminToken, body: { userEmail: userA.email, action: 'activate', days: 30 } })
     const { status, data } = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { question: 'What is HTML?', language: 'en' } })
-    return (status === 200 && typeof data.answer === 'string') || status
+    return (status === 503 && data.code === 'AI_NOT_CONFIGURED') || JSON.stringify({ status, data })
   })
   await check('"+30 days" extends an active AI Pro grant from its end date', async () => {
     const first = (await request(`/api/subscription/${userA.email}`, { token: tokenA })).data.endsAt
@@ -399,18 +411,18 @@ try {
     const diffDays = (new Date(second) - new Date(first)) / 86400000
     return Math.round(diffDays) === 30 || `diff=${diffDays}`
   })
-  await check('AI Pro system switch off -> 503, on -> 200', async () => {
+  await check('AI Pro system switch off -> 503 AI_DISABLED, on -> back to the AI configuration check', async () => {
     await request('/api/admin/ai-pro/system', { method: 'PATCH', token: adminToken, body: { enabled: false } })
     const off = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { question: 'x' } })
     await request('/api/admin/ai-pro/system', { method: 'PATCH', token: adminToken, body: { enabled: true } })
     const on = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { question: 'x' } })
-    return (off.status === 503 && on.status === 200) || `${off.status}/${on.status}`
+    return (off.status === 503 && off.data.code === 'AI_DISABLED' && on.data.code === 'AI_NOT_CONFIGURED') || JSON.stringify({ off: off.data, on: on.data })
   })
 
   // ── Payments (provider intentionally NOT configured in tests) ───────────────
-  await check('Payment order without provider config fails cleanly (502, no internals)', async () => {
-    const { status, data } = await request('/api/payments/orders', { method: 'POST', token: tokenA, body: { planId: 'pro', paymentMethod: 'MBank' } })
-    return (status === 502 && !/credentials|config/i.test(data.error)) || `${status} ${data.error}`
+  await check('Payment order without provider config fails cleanly (503 PAYMENT_NOT_CONFIGURED, no internals)', async () => {
+    const { status, data } = await request('/api/payments/orders', { method: 'POST', token: tokenA, body: { planId: 'aipro', paymentMethod: 'MBank' } })
+    return (status === 503 && data.code === 'PAYMENT_NOT_CONFIGURED' && !/credentials|apiKey|merchant/i.test(data.error)) || `${status} ${data.code} ${data.error}`
   })
   await check('Webhook without valid signature rejected (401)', async () =>
     (await request('/api/payments/webhook/generic', { method: 'POST', body: { orderId: 'x', status: 'paid', amount: 499 } })).status === 401)
@@ -527,7 +539,7 @@ try {
     return (r.status === 400 && /letters and digits/i.test(r.data.error)) || `${r.status} ${r.data.error}`
   })
   await check('Admin password change; old password stops working', async () => {
-    const next = `Adm-${crypto.randomBytes(9).toString('base64url')}`
+    const next = `Adm-${crypto.randomBytes(9).toString('base64url')}7`
     const change = await request('/api/admin/settings/password', { method: 'PUT', token: adminToken, body: { currentPassword: adminPassword, newPassword: next, confirmPassword: next } })
     const old = await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: adminPassword } })
     adminPassword = next

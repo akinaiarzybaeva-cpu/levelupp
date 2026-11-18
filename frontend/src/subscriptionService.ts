@@ -24,6 +24,22 @@ export type UserSubscription = {
   paymentMethod: PaymentMethod | 'none'
   history: PaymentRecord[]
   autoRenew: boolean
+  // ── Server-provided details (present once synced with the backend) ──
+  /** Real status of the paid plan: 'free' | 'active' | 'cancelled' (still usable until endsAt) | 'expired'. */
+  rawStatus?: 'free' | 'active' | 'cancelled' | 'expired'
+  /** Plan whose features can be used right now. */
+  accessPlan?: SubscriptionPlanId
+  hasAccess?: boolean
+  remainingDays?: number
+  purchasedAt?: string | null
+  cancelledAt?: string | null
+  grantedByAdmin?: boolean
+  pendingOrder?: { orderId: string; planId: SubscriptionPlanId; amount: number; paymentMethod: string; createdAt: string; paymentUrl: string | null; provider?: string; paymentReference?: string | null } | null
+  lastReviewNote?: string | null
+  accountId?: string | null
+  lastPaymentStatus?: string | null
+  /** True when the data came from the server (not from the local cache). */
+  synced?: boolean
 }
 
 export const PLAN_META = {

@@ -2,11 +2,13 @@ import crypto from 'node:crypto'
 import { config } from './config.js'
 
 const successStatuses = new Set(['paid', 'success', 'succeeded', 'completed'])
-const cancelStatuses = new Set(['cancelled', 'canceled', 'failed', 'rejected', 'expired'])
+const cancelStatuses = new Set(['cancelled', 'canceled', 'expired', 'voided'])
+const failedStatuses = new Set(['failed', 'failure', 'rejected', 'declined', 'error'])
 
 function normalizeStatus(status) {
   const value = String(status ?? '').trim().toLowerCase()
   if (successStatuses.has(value)) return 'paid'
+  if (failedStatuses.has(value)) return 'failed'
   if (cancelStatuses.has(value)) return 'cancelled'
   return 'pending'
 }
@@ -21,7 +23,9 @@ function getMethodCode(paymentMethod) {
 
 export async function createProviderOrder({ internalOrderId, plan, paymentMethod, userEmail, userName }) {
   if (!config.payment.apiBaseUrl || !config.payment.apiKey || !config.payment.merchantId) {
-    throw new Error('Payment provider credentials are not configured')
+    const error = new Error('Payment provider credentials are not configured')
+    error.code = 'PAYMENT_NOT_CONFIGURED'
+    throw error
   }
 
   const endpoint = new URL(config.payment.createOrderPath, config.payment.apiBaseUrl).toString()
@@ -85,7 +89,8 @@ export async function createProviderOrder({ internalOrderId, plan, paymentMethod
 }
 
 export function verifyWebhookSignature(rawBody, signatureHeader) {
-  if (config.payment.webhookSkipSignature) return true
+  // The skip flag exists only for local development; it is never honoured in production.
+  if (config.payment.webhookSkipSignature && process.env.NODE_ENV !== 'production') return true
   if (!config.payment.webhookSecret) return false
   if (!signatureHeader) return false
 

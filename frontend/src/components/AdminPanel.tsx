@@ -194,6 +194,8 @@ type AdminSection =
   | 'reviews'
   | 'subscriptions'
   | 'payments'
+  | 'plans'
+  | 'requests'
   | 'settings'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1474,6 +1476,7 @@ function LessonsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) =
 
 function AiProSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => void }) {
   const [systemEnabled, setSystemEnabled] = useState(true)
+  const [aiProvider, setAiProvider] = useState<{ configured: boolean; model: string } | null>(null)
   const [activeUsersCount, setActiveUsersCount] = useState(0)
   const [totalGrants, setTotalGrants] = useState(0)
   const [users, setUsers] = useState<AdminAiProUser[]>([])
@@ -1485,6 +1488,7 @@ function AiProSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => 
     setLoading(true)
     try {
       const data = await adminFetch<{
+        provider?: { configured: boolean; model: string }
         systemEnabled: boolean
         activeAiProUsers: number
         totalAiProGrants: number
@@ -1492,6 +1496,7 @@ function AiProSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => 
       }>('/api/admin/ai-pro')
 
       setSystemEnabled(data.systemEnabled)
+      setAiProvider(data.provider ?? null)
       setActiveUsersCount(data.activeAiProUsers)
       setTotalGrants(data.totalAiProGrants)
       setUsers(data.users ?? [])
@@ -1568,6 +1573,14 @@ function AiProSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => 
           {systemEnabled ? '✓ AI Pro Enabled' : '✕ AI Pro Disabled'}
         </button>
       </div>
+
+      {aiProvider && (
+        <p className="admin-hint">
+          AI provider (Claude API): {aiProvider.configured
+            ? <span className="admin-pill success">configured · {aiProvider.model}</span>
+            : <span className="admin-pill danger">not configured — set ANTHROPIC_API_KEY on the backend</span>}
+        </p>
+      )}
 
       <div className="admin-stats-grid compact-stats">
         <div className="admin-stat-card purple">
@@ -1839,6 +1852,8 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebouncedValue(search)
   const [planFilter, setPlanFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [historyFor, setHistoryFor] = useState<string | null>(null)
   const [grantTarget, setGrantTarget] = useState<string | null>(null)
   const [grantPlan, setGrantPlan] = useState('pro')
 
@@ -1848,6 +1863,7 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
       const params = new URLSearchParams()
       if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim())
       if (planFilter !== 'all') params.set('plan', planFilter)
+      if (statusFilter !== 'all') params.set('status', statusFilter)
       const data = await adminFetch<{ subscriptions: AdminSubscription[] }>(`/api/admin/subscriptions?${params}`)
       setSubscriptions(data.subscriptions ?? [])
     } catch (err) {
@@ -1855,7 +1871,7 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
     } finally {
       setLoading(false)
     }
-  }, [debouncedSearch, planFilter, onToast])
+  }, [debouncedSearch, planFilter, statusFilter, onToast])
 
   useEffect(() => { void loadSubs() }, [loadSubs])
 
@@ -1877,19 +1893,21 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
   const subStatusPill = (status: string) => {
     if (status === 'active') return 'admin-pill success'
     if (status === 'expired') return 'admin-pill danger'
+    if (status === 'cancelled') return 'admin-pill warning'
     return 'admin-pill neutral'
   }
 
   return (
     <div className="admin-section">
+      {historyFor && <SubscriptionHistoryModal userEmail={historyFor} onClose={() => setHistoryFor(null)} />}
       {grantTarget && (
         <div className="admin-confirm-backdrop">
           <div className="admin-confirm-card">
             <h3>Activate Subscription</h3>
             <p>Grant a subscription plan to <strong>{grantTarget}</strong></p>
             <select value={grantPlan} onChange={(e) => setGrantPlan(e.target.value)} className="admin-inline-select">
-              <option value="pro">PRO Plan (499 KGS, 30 days)</option>
-              <option value="aipro">AI PRO Plan (799 KGS, 30 days)</option>
+              <option value="pro">PRO plan (free grant, plan period)</option>
+              <option value="aipro">AI PRO plan (free grant, plan period)</option>
             </select>
             <div className="admin-confirm-actions">
               <button type="button" className="btn btn-secondary small" onClick={() => setGrantTarget(null)}>Cancel</button>
@@ -1921,6 +1939,12 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
               <option value="free">Free</option>
               <option value="pro">PRO</option>
               <option value="aipro">AI PRO</option>
+            </select>
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status">
+              <option value="all">All Statuses</option>
+              <option value="active">Active</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="expired">Expired</option>
             </select>
           </div>
         </div>
@@ -1964,6 +1988,7 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
                         <button type="button" className="btn btn-secondary small" onClick={() => setGrantTarget(row.userEmail)}>
                           Grant
                         </button>
+                        <button type="button" className="btn btn-secondary small" onClick={() => setHistoryFor(row.userEmail)}>History</button>
                         <button type="button" className="btn btn-warning small" onClick={() => void updateSub(row.userEmail, 'revoke')}>
                           Revoke
                         </button>
@@ -1988,6 +2013,7 @@ function PaymentsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) 
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebouncedValue(search)
   const [statusFilter, setStatusFilter] = useState('all')
+  const [detailFor, setDetailFor] = useState<string | null>(null)
 
   const loadPayments = useCallback(async () => {
     setLoading(true)
@@ -2016,6 +2042,7 @@ function PaymentsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) 
 
   return (
     <div className="admin-section">
+      {detailFor && <PaymentDetailModal orderId={detailFor} onClose={() => setDetailFor(null)} />}
       <div className="admin-section-header">
         <div><span className="eyebrow">Database Transactions</span><h2>Payment History</h2></div>
         <button type="button" className="btn btn-secondary small" onClick={() => void loadPayments()} disabled={loading}>
@@ -2060,6 +2087,7 @@ function PaymentsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) 
               <option value="paid">Paid</option>
               <option value="pending">Pending</option>
               <option value="cancelled">Cancelled</option>
+              <option value="failed">Failed</option>
             </select>
           </div>
         </div>
@@ -2081,6 +2109,7 @@ function PaymentsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) 
                   <th>Status</th>
                   <th>Activated</th>
                   <th>Date</th>
+                  <th>Details</th>
                 </tr>
               </thead>
               <tbody>
@@ -2098,6 +2127,7 @@ function PaymentsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) 
                         : <span className="admin-pill neutral">No</span>}
                     </td>
                     <td>{formatDate(row.createdAt)}</td>
+                    <td><button type="button" className="btn btn-secondary small" onClick={() => setDetailFor(row.id)}>Details</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -2186,6 +2216,7 @@ function SettingsSection({ adminEmail, onLogout, onToast }: { adminEmail: string
       </div>
 
       <div className="admin-settings-grid">
+        <TelegramSettingsCard onToast={onToast} />
         <div className="admin-card admin-settings-card">
           <div className="admin-card-header"><h3><Lock size={16} /> Security — Change Password</h3></div>
 
@@ -2329,6 +2360,520 @@ type AdminPanelProps = {
   onLogout: () => void
 }
 
+// ─── Plans (prices, texts, availability) ──────────────────────────────────────
+
+type AdminPlan = {
+  id: 'free' | 'pro' | 'aipro'
+  name: string
+  price: number
+  currency: string
+  durationDays: number
+  isEnabled: boolean
+  isFeatured: boolean
+  label: { kg: string; ru: string; en: string }
+  description: { kg: string; ru: string; en: string }
+  features: { kg: string[]; ru: string[]; en: string[] }
+  updatedAt: string
+}
+
+const PLAN_LANGS = [['kg', 'Кыргызча'], ['ru', 'Русский'], ['en', 'English']] as const
+
+function PlansSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => void }) {
+  const [plans, setPlans] = useState<AdminPlan[]>([])
+  const [loading, setLoading] = useState(true)
+  const [editing, setEditing] = useState<AdminPlan | null>(null)
+  const [featuresText, setFeaturesText] = useState({ kg: '', ru: '', en: '' })
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await adminFetch<{ plans: AdminPlan[] }>('/api/admin/plans')
+      setPlans(data.plans ?? [])
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Failed to load plans', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [onToast])
+
+  useEffect(() => { void load() }, [load])
+
+  const save = async (planId: string, patch: Record<string, unknown>, message: string) => {
+    setSaving(true)
+    try {
+      await adminFetch(`/api/admin/plans/${planId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
+      onToast(message, 'success')
+      setEditing(null)
+      void load()
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Failed to save plan', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const openEditor = (plan: AdminPlan) => {
+    setEditing({ ...plan, label: { ...plan.label }, description: { ...plan.description } })
+    setFeaturesText({ kg: plan.features.kg.join('\n'), ru: plan.features.ru.join('\n'), en: plan.features.en.join('\n') })
+  }
+
+  return (
+    <div className="admin-section">
+      <div className="admin-section-header">
+        <div>
+          <span className="eyebrow">Pricing</span>
+          <h2>Plans</h2>
+        </div>
+        <button type="button" className="btn btn-secondary small" onClick={() => void load()} disabled={loading}>
+          <RefreshCw size={14} className={loading ? 'spin' : ''} /> Refresh
+        </button>
+      </div>
+      <p className="admin-hint">Prices and texts are read by the website and by the payment backend. A new price applies to new orders only; already paid subscriptions are not changed.</p>
+      {loading && <div className="admin-loading-bar" />}
+      <div className="admin-card">
+        <div className="admin-table-wrap">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Plan</th>
+                <th>Price</th>
+                <th>Period</th>
+                <th>Status</th>
+                <th>Recommended</th>
+                <th>Updated</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {plans.map((plan) => (
+                <tr key={plan.id}>
+                  <td><strong>{plan.name}</strong><br /><small>{plan.label.ru}</small></td>
+                  <td>{formatMoney(plan.price, plan.currency)}</td>
+                  <td>{plan.durationDays} days</td>
+                  <td><span className={plan.isEnabled ? 'admin-pill success' : 'admin-pill neutral'}>{plan.isEnabled ? 'Enabled' : 'Disabled'}</span></td>
+                  <td>{plan.isFeatured ? 'Yes' : '—'}</td>
+                  <td>{formatDate(plan.updatedAt)}</td>
+                  <td>
+                    <div className="admin-actions">
+                      <button type="button" className="btn btn-secondary small" onClick={() => openEditor(plan)} title="Edit plan"><Edit2 size={13} /> Edit</button>
+                      {plan.id !== 'free' && (
+                        <button type="button" className={`btn small ${plan.isEnabled ? 'btn-warning' : 'btn-secondary'}`} onClick={() => void save(plan.id, { isEnabled: !plan.isEnabled }, plan.isEnabled ? `${plan.name} disabled` : `${plan.name} enabled`)}>
+                          {plan.isEnabled ? 'Disable' : 'Enable'}
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {editing && (
+        <div className="admin-modal-backdrop" role="dialog" aria-modal="true" aria-label={`Edit ${editing.name}`}>
+          <div className="admin-modal-card large">
+            <div className="admin-modal-header">
+              <h3>Edit plan: {editing.name}</h3>
+              <button type="button" className="admin-modal-close" onClick={() => setEditing(null)} aria-label="Close"><X size={16} /></button>
+            </div>
+            <form
+              className="admin-modal-body"
+              onSubmit={(event) => {
+                event.preventDefault()
+                const features = Object.fromEntries(PLAN_LANGS.map(([lang]) => [lang, featuresText[lang].split('\n').map((line) => line.trim()).filter(Boolean)]))
+                void save(editing.id, {
+                  price: Number(editing.price),
+                  durationDays: Number(editing.durationDays),
+                  isFeatured: editing.isFeatured,
+                  label: editing.label,
+                  description: editing.description,
+                  features
+                }, `${editing.name} saved`)
+              }}
+            >
+              <div className="admin-form-grid">
+                <label className="admin-form-group">
+                  <span>Price ({editing.currency})</span>
+                  <input type="number" min={0} step={1} value={editing.price} disabled={editing.id === 'free'} onChange={(e) => setEditing({ ...editing, price: Number(e.target.value) })} />
+                </label>
+                <label className="admin-form-group">
+                  <span>Period (days)</span>
+                  <input type="number" min={1} max={366} step={1} value={editing.durationDays} onChange={(e) => setEditing({ ...editing, durationDays: Number(e.target.value) })} />
+                </label>
+                <label className="admin-form-group full-width admin-checkbox-row">
+                  <input type="checkbox" checked={editing.isFeatured} onChange={(e) => setEditing({ ...editing, isFeatured: e.target.checked })} />
+                  <span>Highlight as the recommended plan</span>
+                </label>
+                {PLAN_LANGS.map(([lang, langName]) => (
+                  <Fragment key={lang}>
+                    <label className="admin-form-group">
+                      <span>Title — {langName}</span>
+                      <input value={editing.label[lang]} maxLength={80} onChange={(e) => setEditing({ ...editing, label: { ...editing.label, [lang]: e.target.value } })} />
+                    </label>
+                    <label className="admin-form-group">
+                      <span>Description — {langName}</span>
+                      <input value={editing.description[lang]} maxLength={400} onChange={(e) => setEditing({ ...editing, description: { ...editing.description, [lang]: e.target.value } })} />
+                    </label>
+                    <label className="admin-form-group full-width">
+                      <span>Features — {langName} (one per line)</span>
+                      <textarea rows={4} value={featuresText[lang]} onChange={(e) => setFeaturesText({ ...featuresText, [lang]: e.target.value })} />
+                    </label>
+                  </Fragment>
+                ))}
+              </div>
+              <div className="admin-modal-footer">
+                <button type="button" className="btn btn-secondary small" onClick={() => setEditing(null)}>Cancel</button>
+                <button type="submit" className="btn btn-primary small" disabled={saving}>{saving ? 'Saving…' : 'Save Plan'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Payment details & subscription history dialogs ───────────────────────────
+
+type PaymentDetail = {
+  order: { id: string; userEmail: string; planId: string; paymentMethod: string; amount: number; currency: string; provider: string; providerOrderId: string | null; providerPaymentId: string | null; status: string; isActivated: boolean; createdAt: string; updatedAt: string; lastProviderPayload: unknown }
+  transactions: Array<{ id: string; provider: string; transactionId: string; amount: number; currency: string; status: string; createdAt: string }>
+}
+
+function PaymentDetailModal({ orderId, onClose }: { orderId: string; onClose: () => void }) {
+  const [detail, setDetail] = useState<PaymentDetail | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    adminFetch<PaymentDetail>(`/api/admin/payments/${encodeURIComponent(orderId)}`).then(setDetail).catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
+  }, [orderId])
+  return (
+    <div className="admin-modal-backdrop" role="dialog" aria-modal="true" aria-label="Payment details">
+      <div className="admin-modal-card large">
+        <div className="admin-modal-header">
+          <h3>Payment details</h3>
+          <button type="button" className="admin-modal-close" onClick={onClose} aria-label="Close"><X size={16} /></button>
+        </div>
+        <div className="admin-modal-body">
+          {error && <div className="admin-notice admin-notice-error"><AlertCircle size={14} /><span>{error}</span></div>}
+          {!detail && !error && <div className="admin-loading-bar" />}
+          {detail && (
+            <>
+              <div className="admin-info-list">
+                {([
+                  ['Order ID', detail.order.id],
+                  ['User', detail.order.userEmail],
+                  ['Plan', detail.order.planId.toUpperCase()],
+                  ['Amount', formatMoney(detail.order.amount, detail.order.currency)],
+                  ['Method', detail.order.paymentMethod],
+                  ['Provider', detail.order.provider],
+                  ['Provider order ID', detail.order.providerOrderId ?? '—'],
+                  ['Transaction ID', detail.order.providerPaymentId ?? '—'],
+                  ['Status', detail.order.status],
+                  ['Subscription activated', detail.order.isActivated ? 'Yes' : 'No'],
+                  ['Created', formatDate(detail.order.createdAt)],
+                  ['Updated', formatDate(detail.order.updatedAt)]
+                ] as Array<[string, string]>).map(([key, value]) => (
+                  <div className="admin-info-row" key={key}><span>{key}</span><strong className="admin-mono">{value}</strong></div>
+                ))}
+              </div>
+              <h4>Verified transactions</h4>
+              {detail.transactions.length === 0 ? <p className="admin-empty-state">No verified transaction yet.</p> : (
+                <ul className="admin-plain-list">
+                  {detail.transactions.map((tx) => <li key={tx.id}><span className="admin-mono">{tx.transactionId}</span> · {formatMoney(tx.amount, tx.currency)} · {tx.status} · {formatDate(tx.createdAt)}</li>)}
+                </ul>
+              )}
+              {detail.order.lastProviderPayload != null && (
+                <details>
+                  <summary>Last provider callback</summary>
+                  <pre className="admin-json">{JSON.stringify(detail.order.lastProviderPayload, null, 2)}</pre>
+                </details>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+type HistoryEntry = { id: string; event: string; planId: string; status: string; startedAt: string | null; endsAt: string | null; amount: number; currency: string; paymentMethod: string | null; orderId: string | null; transactionId: string | null; createdAt: string }
+
+function SubscriptionHistoryModal({ userEmail, onClose }: { userEmail: string; onClose: () => void }) {
+  const [history, setHistory] = useState<HistoryEntry[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    adminFetch<{ history: HistoryEntry[] }>(`/api/admin/subscriptions/${encodeURIComponent(userEmail)}/history`).then((data) => setHistory(data.history ?? [])).catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
+  }, [userEmail])
+  return (
+    <div className="admin-modal-backdrop" role="dialog" aria-modal="true" aria-label="Subscription history">
+      <div className="admin-modal-card large">
+        <div className="admin-modal-header">
+          <h3>History: {userEmail}</h3>
+          <button type="button" className="admin-modal-close" onClick={onClose} aria-label="Close"><X size={16} /></button>
+        </div>
+        <div className="admin-modal-body">
+          {error && <div className="admin-notice admin-notice-error"><AlertCircle size={14} /><span>{error}</span></div>}
+          {!history && !error && <div className="admin-loading-bar" />}
+          {history && history.length === 0 && <p className="admin-empty-state">No subscription events yet.</p>}
+          {history && history.length > 0 && (
+            <div className="admin-table-wrap">
+              <table className="admin-table">
+                <thead><tr><th>When</th><th>Event</th><th>Plan</th><th>Period</th><th>Amount</th><th>Transaction</th></tr></thead>
+                <tbody>
+                  {history.map((h) => (
+                    <tr key={h.id}>
+                      <td>{formatDate(h.createdAt)}</td>
+                      <td>{h.event.replace(/_/g, ' ')}</td>
+                      <td>{h.planId.toUpperCase()}</td>
+                      <td>{h.startedAt ? formatDate(h.startedAt) : '—'} → {h.endsAt ? formatDate(h.endsAt) : '—'}</td>
+                      <td>{h.amount ? formatMoney(h.amount, h.currency) : '—'}</td>
+                      <td><small className="admin-mono">{h.transactionId ?? '—'}</small></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Telegram purchase notifications ──────────────────────────────────────────
+
+type TelegramStatus = {
+  botTokenConfigured: boolean
+  chatIdConfigured: boolean
+  configured: boolean
+  enabled: boolean
+  lastSuccessAt: string | null
+  lastSuccessKind: string | null
+  purchaseCounts: Record<string, number>
+  recentErrors: Array<{ kind: string; error: string; at: string }>
+}
+
+function TelegramSettingsCard({ onToast }: { onToast: (msg: string, kind: ToastKind) => void }) {
+  const [status, setStatus] = useState<TelegramStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      setStatus(await adminFetch<TelegramStatus>('/api/admin/telegram'))
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Failed to load Telegram status', 'error')
+    }
+  }, [onToast])
+
+  useEffect(() => { void load() }, [load])
+
+  const toggle = async () => {
+    if (!status) return
+    setBusy(true)
+    try {
+      setStatus(await adminFetch<TelegramStatus>('/api/admin/telegram', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !status.enabled }) }))
+      onToast(`Purchase notifications ${status.enabled ? 'disabled' : 'enabled'}`, 'success')
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Failed to update', 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const sendTest = async () => {
+    setBusy(true)
+    try {
+      const result = await adminFetch<{ ok: boolean; status: TelegramStatus }>('/api/admin/telegram/test', { method: 'POST' })
+      setStatus(result.status)
+      onToast('Test message delivered to Telegram', 'success')
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Test message failed', 'error')
+      void load()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="admin-card admin-settings-card admin-telegram-card">
+      <div className="admin-card-header"><h3><Bell size={16} /> Telegram notifications</h3></div>
+      {!status ? <div className="admin-loading-bar" /> : (
+        <>
+          <div className="admin-info-list">
+            <div className="admin-info-row"><span>Connection</span><span className={status.configured ? 'admin-pill success' : 'admin-pill danger'}>{status.configured ? 'Configured' : 'Not configured'}</span></div>
+            <div className="admin-info-row"><span>Bot token (TELEGRAM_BOT_TOKEN)</span><strong>{status.botTokenConfigured ? 'Set' : 'Missing'}</strong></div>
+            <div className="admin-info-row"><span>Admin chat (TELEGRAM_ADMIN_CHAT_ID)</span><strong>{status.chatIdConfigured ? 'Set' : 'Missing'}</strong></div>
+            <div className="admin-info-row"><span>Purchase notifications</span><strong>{status.enabled ? 'On' : 'Off'}</strong></div>
+            <div className="admin-info-row"><span>Last successful message</span><strong>{status.lastSuccessAt ? `${formatDate(status.lastSuccessAt)} (${status.lastSuccessKind})` : 'Never'}</strong></div>
+            <div className="admin-info-row"><span>Purchase messages sent / failed</span><strong>{status.purchaseCounts.sent ?? 0} / {status.purchaseCounts.failed ?? 0}</strong></div>
+          </div>
+          <div className="admin-telegram-actions">
+            <button type="button" className={status.enabled ? 'btn btn-warning small' : 'btn btn-primary small'} onClick={() => void toggle()} disabled={busy}>
+              {status.enabled ? 'Turn notifications off' : 'Turn notifications on'}
+            </button>
+            <button type="button" className="btn btn-secondary small" onClick={() => void sendTest()} disabled={busy || !status.configured}>
+              <Bell size={14} /> Send test message
+            </button>
+          </div>
+          {!status.configured && <p className="admin-hint">Set TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_CHAT_ID on the backend (Render → Environment) and redeploy.</p>}
+          {status.recentErrors.length > 0 && (
+            <details className="admin-telegram-errors">
+              <summary>Recent errors ({status.recentErrors.length})</summary>
+              <ul className="admin-plain-list">
+                {status.recentErrors.map((e) => <li key={`${e.at}-${e.kind}`}><small>{formatDate(e.at)} · {e.kind}</small><br /><span>{e.error}</span></li>)}
+              </ul>
+            </details>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+type PurchaseRequest = {
+  id: string
+  userEmail: string
+  fullName: string | null
+  accountId: string | null
+  planId: string
+  amount: number
+  currency: string
+  paymentMethod: string
+  status: string
+  activated: boolean
+  payerName: string | null
+  transactionId: string | null
+  receiptNote: string | null
+  reviewedAt: string | null
+  reviewedBy: string | null
+  reviewNote: string | null
+  createdAt: string
+}
+
+/** Manual bank transfers: the administrator checks the bank statement, then approves or rejects. */
+function PurchaseRequestsSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => void }) {
+  const [requests, setRequests] = useState<PurchaseRequest[]>([])
+  const [statusFilter, setStatusFilter] = useState('pending')
+  const [loading, setLoading] = useState(true)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [manualEnabled, setManualEnabled] = useState(true)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await adminFetch<{ requests: PurchaseRequest[]; manualTransfer: { enabled: boolean } }>(`/api/admin/purchase-requests?status=${encodeURIComponent(statusFilter)}`)
+      setRequests(data.requests)
+      setManualEnabled(data.manualTransfer.enabled)
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Failed to load purchase requests', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [statusFilter, onToast])
+
+  useEffect(() => { void load() }, [load])
+
+  const review = async (request: PurchaseRequest, action: 'approve' | 'reject') => {
+    let note = ''
+    if (action === 'approve') {
+      if (!window.confirm(`Approve ${formatMoney(request.amount, request.currency)} from ${request.payerName ?? request.userEmail} (ref ${request.transactionId})?\nOnly approve after you have seen this payment in the bank account.`)) return
+    } else {
+      const reason = window.prompt('Reason for rejection (shown to the user):', 'Payment not found')
+      if (reason === null) return
+      note = reason
+    }
+    setBusyId(request.id)
+    try {
+      await adminFetch(`/api/admin/purchase-requests/${encodeURIComponent(request.id)}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note })
+      })
+      onToast(action === 'approve' ? 'Payment approved — plan activated' : 'Request rejected', 'success')
+      await load()
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Action failed', 'error')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const pillClass = (status: string) => status === 'paid' ? 'admin-pill success' : status === 'pending' ? 'admin-pill warning' : 'admin-pill danger'
+
+  return (
+    <div className="admin-section">
+      <div className="admin-section-header">
+        <div><span className="eyebrow">Manual bank transfers</span><h2>Purchase Requests</h2></div>
+        <button type="button" className="btn btn-secondary small" onClick={() => void load()} disabled={loading}>
+          <RefreshCw size={14} className={loading ? 'spin' : ''} /> Refresh
+        </button>
+      </div>
+      {!manualEnabled && (
+        <p className="admin-hint">Bank transfer is turned off for users. Set MANUAL_TRANSFER_ENABLED=true and MANUAL_TRANSFER_ACCOUNT on the backend to enable it.</p>
+      )}
+      <div className="admin-card">
+        <div className="admin-card-header">
+          <h3>Requests <span className="admin-count-badge">{requests.length}</span></h3>
+          <div className="table-tools">
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status">
+              <option value="pending">Pending</option>
+              <option value="paid">Approved (paid)</option>
+              <option value="failed">Rejected</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+        </div>
+        {loading ? (
+          <div className="admin-empty-state"><RefreshCw size={18} className="spin" /> Loading…</div>
+        ) : requests.length === 0 ? (
+          <div className="admin-empty-state">No purchase requests</div>
+        ) : (
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Customer</th>
+                  <th>Plan</th>
+                  <th>Amount</th>
+                  <th>Payer / Transaction ID</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requests.map((row) => (
+                  <tr key={row.id}>
+                    <td><strong>{row.fullName ?? '—'}</strong><br /><small>{row.userEmail}{row.accountId ? ` · ${row.accountId}` : ''}</small></td>
+                    <td>{row.planId.toUpperCase()}</td>
+                    <td>{formatMoney(row.amount, row.currency)}</td>
+                    <td>{row.payerName ?? '—'}<br /><span className="admin-mono">{row.transactionId ?? '—'}</span>{row.receiptNote && <><br /><small>{row.receiptNote}</small></>}</td>
+                    <td>
+                      <span className={pillClass(row.status)}>{row.status === 'failed' ? 'rejected' : row.status}</span>
+                      {row.reviewedAt && <><br /><small>{formatDate(row.reviewedAt)}{row.reviewNote ? ` · ${row.reviewNote}` : ''}</small></>}
+                    </td>
+                    <td>{formatDate(row.createdAt)}</td>
+                    <td>
+                      {row.status === 'pending' ? (
+                        <div className="admin-actions">
+                          <button type="button" className="btn btn-primary small" disabled={busyId === row.id} onClick={() => void review(row, 'approve')}><Check size={14} /> Approve</button>
+                          <button type="button" className="btn btn-warning small" disabled={busyId === row.id} onClick={() => void review(row, 'reject')}><X size={14} /> Reject</button>
+                        </div>
+                      ) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
   const [activeSection, setActiveSection] = useState<AdminSection>('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -2366,6 +2911,8 @@ export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
     { id: 'reviews', label: 'Reviews', icon: MessageSquareText },
     { id: 'subscriptions', label: 'Subscriptions', icon: Crown },
     { id: 'payments', label: 'Payments', icon: WalletCards },
+    { id: 'requests', label: 'Purchase requests', icon: Check },
+    { id: 'plans', label: 'Plans', icon: Crown },
     { id: 'settings', label: 'Settings', icon: Settings }
   ]
 
@@ -2494,6 +3041,12 @@ export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
           )}
           {activeSection === 'payments' && (
             <PaymentsSection onToast={addToast} />
+          )}
+          {activeSection === 'requests' && (
+            <PurchaseRequestsSection onToast={addToast} />
+          )}
+          {activeSection === 'plans' && (
+            <PlansSection onToast={addToast} />
           )}
           {activeSection === 'settings' && (
             <SettingsSection

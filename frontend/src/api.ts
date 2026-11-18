@@ -55,9 +55,31 @@ export function withAuthHeaders(init?: HeadersInit): Headers {
  * fetch + JSON parsing + error normalisation. Throws an Error whose message is the
  * backend's `error` field when the response is not OK.
  */
+/**
+ * fetch() that rides out a backend that is waking up or redeploying (Render free tier):
+ * on a network failure (no response at all) or a 502/503/504 from the hosting proxy it
+ * waits and tries again. Real answers from the API (400, 401, 409...) are returned at once.
+ */
+export async function fetchWithWakeRetry(url: string, init?: RequestInit, delaysMs: number[] = [2000, 5000]): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(url, init)
+      if (![502, 503, 504].includes(response.status) || attempt >= delaysMs.length) return response
+    } catch (error) {
+      if (attempt >= delaysMs.length) throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt]))
+  }
+}
+
+/** True when the browser got no response at all (offline, server asleep/restarting, CORS). */
+export function isNetworkError(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof Error && /Failed to fetch|NetworkError|Load failed/i.test(error.message))
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`
-  const response = await fetch(url, { ...init, headers: withAuthHeaders(init?.headers) })
+  const response = await fetchWithWakeRetry(url, { ...init, headers: withAuthHeaders(init?.headers) })
   const payload = await response.json().catch(() => ({})) as { error?: string }
   if (!response.ok) {
     throw new Error(payload.error ?? `Request failed (${response.status})`)

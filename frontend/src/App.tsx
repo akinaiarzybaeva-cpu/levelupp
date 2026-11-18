@@ -57,20 +57,22 @@ import {
   ListChecks,
   PlayCircle,
   Rocket,
+  RefreshCw,
   ShieldCheck,
   SlidersHorizontal,
-  Zap
+  Zap,
+  Building2,
+  CreditCard
 } from 'lucide-react'
 import { Badge, Button, ButtonLink, Card, EmptyState, Modal, PageHero, PasswordInput, ProgressBar, StarRating, StatTile } from './components/ui'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from 'react-router-dom'
 import { callAiAssistant } from './aiService'
-import { API_BASE_URL, AUTH_TOKEN_KEY, getStoredAuthToken, withAuthHeaders } from './api'
+import { API_BASE_URL, AUTH_TOKEN_KEY, fetchWithWakeRetry, getStoredAuthToken, isNetworkError, withAuthHeaders } from './api'
 import { courses as bundledCourses, toEmbedUrl, type Course } from './data'
 // Optimised 384px WebP of assets/лого.png (826 KB -> ~21 KB); displayed at <=170px wide.
 import siteLogo from './assets/logo.webp'
-import { createPaymentOrder, getPaymentOrderStatus, getReviewsFromServer, getServerSubscription, saveReviewToServer } from './paymentApi'
+import { ApiError, cancelServerSubscription, createPaymentOrder, getDemoPaymentConfig, getManualTransferConfig, getPaymentOrderStatus, submitDemoCardPayment, submitManualTransfer, type ManualTransferConfig, getPlans, getReviewsFromServer, getServerSubscription, getSubscriptionHistory, saveReviewToServer, type SubscriptionHistory } from './paymentApi'
 import {
-  activateUserSubscription,
   archiveExpiredPlans,
   canAccessAiAssistant,
   getDefaultSubscription,
@@ -410,7 +412,7 @@ function appendFromParam(targetPath: string, fromPath: string) {
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   // Identity is proven only by the bearer session token.
-  const response = await fetch(url, { ...init, headers: withAuthHeaders(init?.headers) })
+  const response = await fetchWithWakeRetry(url, { ...init, headers: withAuthHeaders(init?.headers) })
   const payload = await response.json().catch(() => ({})) as { error?: string }
   if (!response.ok) {
     throw new Error(payload.error ?? 'Request failed')
@@ -614,8 +616,144 @@ function useCourseCatalog(): CourseCatalog {
 }
 
 type ApiLangText = { kg?: string | null; ru?: string | null; en?: string | null }
-type ApiCourseLesson = { id: string; title: ApiLangText; duration?: string; type?: string; theory?: string; code?: string; task?: string; videoUrl?: string; quiz?: { prompt?: ApiLangText; options?: string[]; answer?: number } }
+type ApiCourseLesson = { id: string; title: ApiLangText; duration?: string; type?: string; theory?: string; code?: string; task?: string; videoUrl?: string; quiz?: { prompt?: ApiLangText; options?: string[]; answer?: number }; locked?: boolean }
 type ApiCourse = Omit<Course, 'title' | 'description' | 'lessons' | 'level'> & { title: ApiLangText; description: ApiLangText; level: string; lessons: ApiCourseLesson[] }
+
+// ─── Plans & subscription (shared by pricing, checkout, dashboard, lessons) ────
+
+type PlanView = {
+  id: SubscriptionPlanId
+  name: string
+  price: number
+  currency: string
+  durationDays: number
+  featured: boolean
+  label: Record<Lang, string>
+  description: Record<Lang, string>
+  features: Record<Lang, string[]>
+}
+
+/** Used only until the server answers (or if it is unreachable). Same prices as the backend seed. */
+const bundledPlans: PlanView[] = pricingPlans.map((plan) => ({
+  id: plan.id as SubscriptionPlanId,
+  name: plan.name,
+  price: plan.price,
+  currency: 'KGS',
+  durationDays: 30,
+  featured: Boolean(plan.featured),
+  label: { ...plan.label },
+  description: { ...plan.description },
+  features: { kg: [...plan.features.kg], ru: [...plan.features.ru], en: [...plan.features.en] }
+}))
+
+const PLAN_RANK: Record<SubscriptionPlanId, number> = { free: 0, pro: 1, aipro: 2 }
+/** Lessons per course without a paid plan (the backend applies the same limits). */
+const GUEST_LESSON_LIMIT = 1
+const FREE_LESSON_LIMIT = 3
+
+type BillingState = {
+  plans: PlanView[]
+  subscription: UserSubscription
+  isLoggedIn: boolean
+  isAdmin: boolean
+  userEmail: string | null
+  refreshSubscription: () => Promise<UserSubscription | null>
+}
+
+const BillingContext = createContext<BillingState>({
+  plans: bundledPlans,
+  subscription: getDefaultSubscription('free'),
+  isLoggedIn: false,
+  isAdmin: false,
+  userEmail: null,
+  refreshSubscription: async () => null
+})
+
+function useBilling(): BillingState {
+  return useContext(BillingContext)
+}
+
+/** The plan whose features can be used now. Only data confirmed by the server unlocks paid features. */
+function accessPlanOf(subscription?: UserSubscription | null): SubscriptionPlanId {
+  if (!subscription?.synced) return 'free'
+  return subscription.accessPlan ?? 'free'
+}
+
+/** How many lessons of each course the viewer may open (Infinity = all). */
+function useLessonLimit(): number {
+  const { isLoggedIn, isAdmin, subscription } = useBilling()
+  if (isAdmin) return Infinity
+  if (!isLoggedIn) return GUEST_LESSON_LIMIT
+  return PLAN_RANK[accessPlanOf(subscription)] >= PLAN_RANK.pro ? Infinity : FREE_LESSON_LIMIT
+}
+
+function planPeriodLabel(plan: PlanView, language: Lang, t: (typeof translations)[Lang]) {
+  return plan.durationDays === 30 ? t.subscription.monthly : pick(language, `${plan.durationDays} күн`, `${plan.durationDays} дней`, `${plan.durationDays} days`)
+}
+
+function formatDateTime(value: string | null | undefined, language: Lang, withTime = false) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  const locale = language === 'kg' ? 'ky-KG' : language === 'ru' ? 'ru-RU' : 'en-US'
+  return withTime ? date.toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' }) : date.toLocaleDateString(locale, { dateStyle: 'medium' })
+}
+
+function subscriptionStatusText(subscription: UserSubscription, language: Lang) {
+  const raw = subscription.rawStatus ?? 'free'
+  if (raw === 'free') return pick(language, 'Акысыз тариф', 'Бесплатный тариф', 'Free plan')
+  if (raw === 'cancelled') return pick(language, 'Жокко чыгарылды — мөөнөтү бүткөнчө иштейт', 'Отменена — действует до конца срока', 'Cancelled — active until the end date')
+  if (raw === 'expired') return pick(language, 'Мөөнөтү бүттү', 'Истекла', 'Expired')
+  return pick(language, 'Активдүү', 'Активна', 'Active')
+}
+
+function paymentStatusText(status: string, language: Lang) {
+  switch (status) {
+    case 'paid': return pick(language, 'Төлөндү', 'Оплачен', 'Paid')
+    case 'pending': return pick(language, 'Күтүлүүдө', 'Ожидает оплаты', 'Pending')
+    case 'failed': return pick(language, 'Ийгиликсиз', 'Ошибка оплаты', 'Failed')
+    case 'cancelled': return pick(language, 'Жокко чыгарылды', 'Отменён', 'Cancelled')
+    default: return status
+  }
+}
+
+function historyEventText(event: string, language: Lang) {
+  switch (event) {
+    case 'activated': return pick(language, 'Сатып алынды', 'Покупка', 'Purchased')
+    case 'renewed': return pick(language, 'Узартылды', 'Продление', 'Renewed')
+    case 'upgraded': return pick(language, 'Тариф жогорулатылды', 'Повышение тарифа', 'Upgraded')
+    case 'changed': return pick(language, 'Тариф өзгөртүлдү', 'Смена тарифа', 'Plan changed')
+    case 'cancelled': return pick(language, 'Жокко чыгарылды', 'Отмена', 'Cancelled')
+    case 'expired': return pick(language, 'Мөөнөтү бүттү', 'Истекла', 'Expired')
+    case 'admin_grant': return pick(language, 'Администратор активдештирди', 'Активировано администратором', 'Granted by administrator')
+    case 'admin_revoke': return pick(language, 'Администратор токтотту', 'Отключено администратором', 'Revoked by administrator')
+    case 'payment_failed': return pick(language, 'Төлөм ийгиликсиз', 'Ошибка оплаты', 'Payment failed')
+    case 'payment_cancelled': return pick(language, 'Төлөм жокко чыгарылды', 'Оплата отменена', 'Payment cancelled')
+    case 'manual_submitted': return pick(language, 'Которуу текшерүүгө жөнөтүлдү', 'Перевод отправлен на проверку', 'Transfer sent for review')
+    default: return event
+  }
+}
+
+/** Accessible "this lesson needs PRO" dialog used by the course and lesson pages. */
+function UpgradeRequiredModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const language = useLanguage()
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      icon={Lock}
+      title={pick(language, 'Бул сабак PRO тарифинде', 'Этот урок доступен в PRO', 'This lesson is part of PRO')}
+      actions={(
+        <>
+          <Button variant="secondary" size="sm" onClick={onClose}>{pick(language, 'Жабуу', 'Закрыть', 'Close')}</Button>
+          <ButtonLink size="sm" to="/pricing" icon={Rocket}>{pick(language, 'Тарифтерди көрүү', 'Посмотреть тарифы', 'See plans')}</ButtonLink>
+        </>
+      )}
+    >
+      <p>{pick(language, `Акысыз тарифте ар бир курстун алгачкы ${FREE_LESSON_LIMIT} сабагы ачык. Калган сабактар PRO жана AI PRO тарифтеринде.`, `В бесплатном тарифе открыты первые ${FREE_LESSON_LIMIT} урока каждого курса. Остальные уроки — в тарифах PRO и AI PRO.`, `The free plan opens the first ${FREE_LESSON_LIMIT} lessons of every course. The rest are in PRO and AI PRO.`)}</p>
+    </Modal>
+  )
+}
 
 function toLangText(value: ApiLangText | undefined): { kg: string; ru: string; en: string } {
   const ru = String(value?.ru ?? '').trim()
@@ -639,7 +777,8 @@ function mapApiCourse(apiCourse: ApiCourse): Course {
       prompt: toLangText(lesson.quiz?.prompt),
       options: Array.isArray(lesson.quiz?.options) ? lesson.quiz.options : [],
       answer: Number(lesson.quiz?.answer ?? 0)
-    }
+    },
+    locked: Boolean(lesson.locked)
   }))
 
   return {
@@ -705,6 +844,7 @@ function AppShell() {
   const leaderboard = useMemo(() => buildLeaderboard(allUsers, userProgress), [allUsers, userProgress])
   const currentUserLessons = user ? (userProgress[user.email]?.lessonsCompleted ?? []) : completedLessons
   const currentUserSubscription = user ? (subscriptions[user.email] ?? getUserSubscription(user.email)) : getDefaultSubscription('free')
+  const catalogAccessKey = `${accessPlanOf(currentUserSubscription)}:${isAdminRole(user?.role) ? 'admin' : ''}`
   const location = useLocation()
   const isDashboardRoute = location.pathname.startsWith('/dashboard')
 
@@ -744,7 +884,7 @@ function AppShell() {
     }
     void loadCourses()
     return () => { active = false }
-  }, [])
+  }, [authToken, catalogAccessKey])
 
   useEffect(() => {
     setMobileOpen(false)
@@ -952,23 +1092,55 @@ function AppShell() {
     void syncUserProfile()
   }, [refreshSiteStats, user?.email])
 
+  const refreshSubscription = useCallback(async (): Promise<UserSubscription | null> => {
+    if (!user?.email) return null
+    try {
+      const remote = await getServerSubscription(user.email)
+      setUserSubscription(user.email, remote)
+      setSubscriptions((current) => ({ ...current, [user.email]: remote }))
+      return remote
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // eslint-disable-next-line no-console
+      console.error(`Failed to sync subscription from backend: ${message}`)
+      return null
+    }
+  }, [user?.email])
+
   useEffect(() => {
     if (!user?.email) return
-
-    const syncSubscription = async () => {
-      try {
-        const remoteSubscription = await getServerSubscription(user.email)
-        setUserSubscription(user.email, remoteSubscription)
-        setSubscriptions((current) => ({ ...current, [user.email]: remoteSubscription }))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        // eslint-disable-next-line no-console
-        console.error(`Failed to sync subscription from backend: ${message}`)
-      }
+    void refreshSubscription()
+    const onFocus = () => { void refreshSubscription() }
+    window.addEventListener('focus', onFocus)
+    const timer = window.setInterval(() => { void refreshSubscription() }, 5 * 60 * 1000)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.clearInterval(timer)
     }
+  }, [refreshSubscription, user?.email])
 
-    void syncSubscription()
-  }, [user?.email])
+  // Plans (prices, texts, availability) come from the server; bundled ones are only a fallback.
+  const [plans, setPlans] = useState<PlanView[]>(bundledPlans)
+  useEffect(() => {
+    let active = true
+    getPlans()
+      .then((list) => {
+        if (!active || list.length === 0) return
+        setPlans(list.map((plan) => ({
+          id: plan.id,
+          name: plan.name,
+          price: plan.price,
+          currency: plan.currency,
+          durationDays: plan.durationDays,
+          featured: plan.isFeatured,
+          label: plan.label,
+          description: plan.description,
+          features: plan.features
+        })))
+      })
+      .catch((error) => console.warn('Using bundled plans; backend plans unavailable:', error instanceof Error ? error.message : error))
+    return () => { active = false }
+  }, [])
 
   // Role comes from the server session; the backend enforces admin rights on every API call.
   const isAdminUser = isAdminRole(user?.role)
@@ -1184,16 +1356,19 @@ function AppShell() {
     return { ok: true as const, message: pick(language, 'Эскертүү жөндөөлөрү сакталды', 'Настройки уведомлений сохранены', 'Notification settings saved') }
   }
 
-  const handlePlanActivation = (planId: SubscriptionPlanId, method: PaymentMethod = 'MBank') => {
-    if (!user?.email) return
-    const next = activateUserSubscription(user.email, planId, method)
-    if (!next) return
-    setSubscriptions((current) => ({ ...current, [user.email]: next }))
-  }
+  const billing = useMemo<BillingState>(() => ({
+    plans,
+    subscription: currentUserSubscription,
+    isLoggedIn,
+    isAdmin: isAdminUser,
+    userEmail: user?.email ?? null,
+    refreshSubscription
+  }), [plans, currentUserSubscription, isLoggedIn, isAdminUser, user?.email, refreshSubscription])
 
   return (
     <LanguageContext.Provider value={language}>
     <CourseCatalogContext.Provider value={catalog}>
+    <BillingContext.Provider value={billing}>
     <div className="app-shell">
       {!isDashboardRoute && (
         <header className="site-header">
@@ -1332,7 +1507,7 @@ function AppShell() {
           <Route path="/rating" element={<RatingPage t={t} leaderboard={leaderboard} reviews={reviews} currentEmail={user?.email} />} />
           <Route path="/reviews" element={<ReviewsPage t={t} reviews={reviews} setReviews={setReviews} isLoggedIn={isLoggedIn} user={user} onRefreshSiteStats={refreshSiteStats} />} />
           <Route path="/pricing" element={<PricingPage t={t} />} />
-          <Route path="/pricing/checkout/:planId" element={<ProtectedRoute isLoggedIn={isLoggedIn} pending={sessionPending}><CheckoutPage t={t} user={user} onActivatePlan={handlePlanActivation} /></ProtectedRoute>} />
+          <Route path="/pricing/checkout/:planId" element={<ProtectedRoute isLoggedIn={isLoggedIn} pending={sessionPending}><CheckoutPage t={t} user={user} /></ProtectedRoute>} />
           <Route path="/faq" element={<FaqPage t={t} />} />
           <Route path="/privacy" element={<LegalPage title={t.footer.privacy} kind="privacy" />} />
           <Route path="/terms" element={<LegalPage title={t.footer.terms} kind="terms" />} />
@@ -1343,6 +1518,7 @@ function AppShell() {
       <Footer t={t} />
       <MobileBottomNav t={t} isLoggedIn={isLoggedIn} />
     </div>
+    </BillingContext.Provider>
     </CourseCatalogContext.Provider>
     </LanguageContext.Provider>
   )
@@ -1448,6 +1624,7 @@ function HomePage({ t, reviews, leaderboard, siteStats }: { t: (typeof translati
   const { courses } = useCourseCatalog()
   const language = useLanguage()
   const popularCourses = courses.slice(0, 3)
+  const { plans: homePlans } = useBilling()
   const highlightedReviews = reviews.slice(0, 3)
   const featuredCourse = popularCourses[0]
   const startLearningLink = `/start-learning?next=${encodeURIComponent(`/courses/${featuredCourse.id}`)}`
@@ -1611,7 +1788,7 @@ function HomePage({ t, reviews, leaderboard, siteStats }: { t: (typeof translati
         <div className="container">
           <HomeSectionHeader eyebrow={pick(language, 'Тарифтер', 'Тарифы', 'Plans')} title={t.pricingTitle} linkTo="/pricing" linkLabel={t.home.viewAll} />
           <div className="pricing-grid home-pricing">
-            {pricingPlans.map((plan) => <PricingCard key={plan.id} plan={plan} t={t} language={language} />)}
+            {homePlans.map((plan) => <PricingCard key={plan.id} plan={plan} t={t} language={language} />)}
           </div>
         </div>
       </section>
@@ -1760,7 +1937,8 @@ function CourseDetailPage({ t, completedLessons, onCourseComplete, subscription:
   const courseDetailPath = `${location.pathname}${location.search}`
   const lessonPath = (targetLessonId: string) => appendFromParam(`/courses/${courseId}/lessons/${targetLessonId}`, courseDetailPath)
   const [lockedLesson, setLockedLesson] = useState<string | null>(null)
-  const [lockedReason, setLockedReason] = useState<'auth' | 'sequence'>('auth')
+  const [lockedReason, setLockedReason] = useState<'auth' | 'sequence' | 'plan'>('auth')
+  const lessonLimit = useLessonLimit()
   useEffect(() => {
     if (!course) return
     if (course.lessons.every((lesson) => completedLessons.includes(lesson.id))) {
@@ -1783,8 +1961,9 @@ function CourseDetailPage({ t, completedLessons, onCourseComplete, subscription:
         <span>/</span>
         <span>{course.title[language]}</span>
       </div>
+      <UpgradeRequiredModal open={lockedReason === 'plan' && !!lockedLesson} onClose={() => setLockedLesson(null)} />
       <Modal
-        open={!!lockedLesson}
+        open={!!lockedLesson && lockedReason !== 'plan'}
         onClose={() => setLockedLesson(null)}
         icon={Lock}
         title={lockedReason === 'auth' ? t.auth.login : t.buttons.nextLesson}
@@ -1818,8 +1997,8 @@ function CourseDetailPage({ t, completedLessons, onCourseComplete, subscription:
             }}><Play size={16} fill="currentColor" /> {t.buttons.begin}</button>
             <button type="button" className="btn btn-secondary" onClick={() => {
               const nextIndex = course.lessons.findIndex((item) => item.id === nextLesson.id)
-              if (!isLoggedIn && nextIndex >= 1) {
-                setLockedReason('auth')
+              if (nextIndex >= lessonLimit || nextLesson.locked) {
+                setLockedReason(isLoggedIn ? 'plan' : 'auth')
                 setLockedLesson(nextLesson.id)
                 return
               }
@@ -1862,11 +2041,12 @@ function CourseDetailPage({ t, completedLessons, onCourseComplete, subscription:
         <h3><PlayCircle size={20} /> {pick(language, 'Сабактар', 'Уроки курса', 'Course lessons')} <small>{course.lessons.length}</small></h3>
         {course.lessons.map((lesson, index) => {
           const isDone = completedLessons.includes(lesson.id)
-          const isLocked = !isLoggedIn && index >= 1
+          const isLocked = index >= lessonLimit || Boolean(lesson.locked)
+          const needsPlan = isLocked && isLoggedIn
           return (
             <button type="button" key={lesson.id} className={isDone ? 'lesson-row complete' : 'lesson-row'} onClick={() => {
               if (isLocked) {
-                setLockedReason('auth')
+                setLockedReason(isLoggedIn ? 'plan' : 'auth')
                 setLockedLesson(lesson.id)
                 return
               }
@@ -1880,7 +2060,7 @@ function CourseDetailPage({ t, completedLessons, onCourseComplete, subscription:
             }} disabled={false}>
               <span className="lesson-index">{isDone ? <Check size={16} /> : index + 1}</span>
               <span className="lesson-meta"><strong>{lesson.title[language]}</strong><small><Clock3 size={13} /> {lesson.duration} • {lesson.type}</small></span>
-              <span className={isLocked ? 'lesson-status locked' : isDone ? 'lesson-status done' : 'lesson-status'}>{isLocked ? <Lock size={14} /> : isDone ? <CheckCircle2 size={14} /> : <Play size={13} fill="currentColor" />} {isLocked ? t.auth.login : isDone ? t.generic.done : t.generic.open}</span>
+              <span className={isLocked ? 'lesson-status locked' : isDone ? 'lesson-status done' : 'lesson-status'}>{isLocked ? <Lock size={14} /> : isDone ? <CheckCircle2 size={14} /> : <Play size={13} fill="currentColor" />} {needsPlan ? 'PRO' : isLocked ? t.auth.login : isDone ? t.generic.done : t.generic.open}</span>
             </button>
           )
         })}
@@ -1905,6 +2085,7 @@ function LessonPage({ t, completedLessons, subscription: _subscription, isLogged
   const lessonPath = (targetLessonId: string) => appendFromParam(`/courses/${courseId}/lessons/${targetLessonId}`, courseReturnPath)
   const currentLessonPath = `${location.pathname}${location.search}`
   const [watchElapsedSec, setWatchElapsedSec] = useState(0)
+  const lessonLimit = useLessonLimit()
 
   useEffect(() => {
     if (!safeLessonId) return
@@ -1922,10 +2103,19 @@ function LessonPage({ t, completedLessons, subscription: _subscription, isLogged
 
   if (!course || !lesson) return <Navigate to="/courses" replace />
 
-  const accessBlocked = !isLoggedIn && lessonIndex >= 1
+  const accessBlocked = !isLoggedIn && lessonIndex >= GUEST_LESSON_LIMIT
+  const planBlocked = isLoggedIn && (lessonIndex >= lessonLimit || Boolean(lesson.locked))
   const isCompleted = completedLessons.includes(lesson.id)
   const watchRequirementSec = Math.min(120, Math.max(20, Number(safeDuration.replace(/[^\d]/g, '')) * 2))
   const watchReady = watchElapsedSec >= watchRequirementSec
+
+  if (planBlocked) {
+    return (
+      <div className="container section page-block">
+        <UpgradeRequiredModal open onClose={() => navigate(courseReturnPath)} />
+      </div>
+    )
+  }
 
   if (accessBlocked) {
     return (
@@ -2120,8 +2310,12 @@ function LessonPage({ t, completedLessons, subscription: _subscription, isLogged
                      isLocked ? 'locked' : ''
                    ].filter(Boolean).join(' ')}
                    onClick={() => {
-                     if (!isLoggedIn && index >= 1) {
+                     if (!isLoggedIn && index >= GUEST_LESSON_LIMIT) {
                        navigate(`/auth?mode=login&next=${encodeURIComponent(currentLessonPath)}`)
+                       return
+                     }
+                     if (index >= lessonLimit || item.locked) {
+                       navigate('/pricing')
                        return
                      }
                      const previousLessonId = course.lessons[index - 1]?.id
@@ -2300,15 +2494,15 @@ function AuthPage({ t, user, isLoggedIn, setIsLoggedIn, setUser, setAuthToken, o
       }
 
       if (response.token) setAuthToken(response.token)
-      setUserSubscription(nextUser.email, getUserSubscription(nextUser.email) ?? getDefaultSubscription(nextUser.role === 'Admin' ? 'aipro' : 'free'))
+      setUserSubscription(nextUser.email, getDefaultSubscription('free'))
       setUser(nextUser)
       setStoredLastAuthEmail(nextUser.email)
       setIsLoggedIn(true)
       navigate(requestedNext || (nextUser.role === 'Admin' ? '/admin' : '/dashboard'), { replace: true })
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : pick(language, 'Кирүүдө ката кетти', 'Ошибка входа', 'Sign-in error')
-      const message = rawMessage === 'Failed to fetch'
-        ? pick(language, 'Сервер жеткиликсиз. Backend иштеп жатканын жана API дареги туура экенин текшериңиз.', 'Сервер недоступен. Проверьте, что Backend запущен и URL API корректен.', 'The server is unavailable. Check that the backend is running and the API URL is correct.')
+      const message = isNetworkError(error)
+        ? pick(language, 'Сервер азыр жооп бербей жатат (ойгонуп же жаңыланып жатышы мүмкүн). Бир мүнөттөн кийин кайра аракет кылыңыз.', 'Сервер сейчас не отвечает (возможно, он запускается или обновляется). Подождите минуту и попробуйте снова.', 'The server is not responding right now (it may be starting up or updating). Please wait a minute and try again.')
         : rawMessage
       if (mode === 'register' && /already exists/i.test(rawMessage)) {
         setMode('login')
@@ -2678,22 +2872,7 @@ function DashboardPage({ t, user, completedLessons, subscription, onUpdateProfil
             </div>
           </section>
 
-          <section className="detail-card dashboard-profile-summary">
-            <div className="card-header-row">
-              <h3>{t.subscription.title}</h3>
-              <Link to="/pricing" className="text-link">{t.subscription.changePlan}</Link>
-            </div>
-            <div className="subscription-summary-inline">
-              <div className="subscription-summary-box">
-                <span className="subscription-tier-pill">{planTag}</span>
-                <h4>{subscriptionPlanName}</h4>
-              </div>
-              <div className="subscription-meta-inline">
-                <div><span>{t.subscription.nextRenewal}</span><strong>{remainingDays} {t.subscription.monthly}</strong></div>
-                <div><span>{t.subscription.history}</span><strong>{resolvedSubscription.history.length}</strong></div>
-              </div>
-            </div>
-          </section>
+          <SubscriptionPanel />
         </main>
       </div>
 
@@ -3522,7 +3701,9 @@ function ReviewCard({ review, language, onEdit }: { review: Review; language: La
 function PricingPage({ t }: { t: (typeof translations)[Lang] }) {
   const language = useLanguage()
   const location = useLocation()
+  const { plans, subscription, isLoggedIn } = useBilling()
   const fallbackPath = location.pathname.startsWith('/dashboard') ? '/dashboard' : '/'
+  const current = accessPlanOf(subscription)
 
   return (
     <div className="container section page-block pricing-page">
@@ -3532,252 +3713,516 @@ function PricingPage({ t }: { t: (typeof translations)[Lang] }) {
         title={t.pricingTitle}
         subtitle={pick(language, 'Акысыз баштаңыз жана каалаган убакта PRO же AI Pro тарифине өтүңүз.', 'Начните бесплатно и переходите на PRO или AI Pro в любой момент.', 'Start free and upgrade to PRO or AI Pro at any time.')}
       />
+      {isLoggedIn && subscription.synced && (
+        <div className="current-plan-banner" role="status">
+          <BadgeCheck size={20} />
+          <span>
+            {pick(language, 'Сиздин тариф', 'Ваш тариф', 'Your plan')}: <strong>{PLAN_META[current].name}</strong>
+            {current !== 'free' && subscription.endsAt ? <> · {pick(language, 'чейин', 'до', 'until')} {formatDateTime(subscription.endsAt, language)}</> : null}
+            {subscription.rawStatus === 'cancelled' ? <> · {subscriptionStatusText(subscription, language)}</> : null}
+          </span>
+          <Link to="/dashboard" className="text-link">{pick(language, 'Тарифимди көрүү', 'Мой тариф', 'View my plan')}</Link>
+        </div>
+      )}
       <div className="pricing-grid big-grid">
-        {pricingPlans.map((plan) => <PricingCard key={plan.id} plan={plan} t={t} language={language} />)}
+        {plans.map((plan) => <PricingCard key={plan.id} plan={plan} t={t} language={language} />)}
       </div>
-      <p className="pricing-note"><ShieldCheck size={16} /> {pick(language, 'Төлөм MBank, O!Деньги же Элсом аркылуу. Тариф 30 күнгө активдешет.', 'Оплата через MBank, O!Деньги или Элсом. Тариф активируется на 30 дней.', 'Pay with MBank, O!Dengi or Elsom. The plan is activated for 30 days.')}</p>
+      <PlanComparison plans={plans} />
+      <p className="pricing-note"><ShieldCheck size={16} /> {pick(language, 'Төлөм MBank, O!Деньги же Элсом аркылуу. Тариф төлөм ырасталгандан кийин гана активдешет.', 'Оплата через MBank, O!Деньги или Элсом. Тариф активируется только после подтверждения оплаты.', 'Pay with MBank, O!Dengi or Elsom. A plan is activated only after the payment is confirmed.')}</p>
     </div>
+  )
+}
+
+/** Side-by-side view of what each plan actually unlocks (the same rules the backend enforces). */
+function PlanComparison({ plans }: { plans: PlanView[] }) {
+  const language = useLanguage()
+  const yes = <CheckCircle2 size={18} className="cmp-yes" aria-label={pick(language, 'Бар', 'Есть', 'Included')} />
+  const no = <X size={18} className="cmp-no" aria-label={pick(language, 'Жок', 'Нет', 'Not included')} />
+  const ids = plans.map((plan) => plan.id)
+  const rows: Array<{ label: string; values: Record<SubscriptionPlanId, React.ReactNode> }> = [
+    { label: pick(language, 'Ар бир курстагы сабактар', 'Уроки в каждом курсе', 'Lessons in every course'), values: { free: pick(language, `Алгачкы ${FREE_LESSON_LIMIT}`, `Первые ${FREE_LESSON_LIMIT}`, `First ${FREE_LESSON_LIMIT}`), pro: pick(language, 'Баары', 'Все', 'All'), aipro: pick(language, 'Баары', 'Все', 'All') } },
+    { label: pick(language, 'Окуу прогресси', 'Прогресс обучения', 'Learning progress'), values: { free: yes, pro: yes, aipro: yes } },
+    { label: pick(language, 'Курсту толук бүтүрүү', 'Полное прохождение курса', 'Complete full courses'), values: { free: no, pro: yes, aipro: yes } },
+    { label: pick(language, 'AI жардамчы', 'AI-ассистент', 'AI assistant'), values: { free: no, pro: no, aipro: yes } },
+    { label: pick(language, 'Баасы', 'Цена', 'Price'), values: Object.fromEntries(plans.map((plan) => [plan.id, `${plan.price} ${plan.currency === 'KGS' ? 'сом' : plan.currency}`])) as Record<SubscriptionPlanId, React.ReactNode> }
+  ]
+  return (
+    <section className="plan-comparison" aria-label={pick(language, 'Тарифтерди салыштыруу', 'Сравнение тарифов', 'Plan comparison')}>
+      <h2>{pick(language, 'Тарифтерди салыштыруу', 'Сравнение тарифов', 'Compare plans')}</h2>
+      <div className="plan-comparison-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col"><span className="sr-only">{pick(language, 'Мүмкүнчүлүк', 'Возможность', 'Feature')}</span></th>
+              {plans.map((plan) => <th key={plan.id} scope="col" className={plan.featured ? 'featured' : ''}>{plan.name}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.label}>
+                <th scope="row">{row.label}</th>
+                {ids.map((id) => <td key={id}>{row.values[id]}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   )
 }
 
 const planIcons: Record<string, typeof BookOpen> = { free: BookOpen, pro: Rocket, aipro: Bot }
 
-/** One pricing plan card, shared by the home page and the pricing page. */
-function PricingCard({ plan, t, language }: { plan: (typeof pricingPlans)[number]; t: (typeof translations)[Lang]; language: Lang }) {
+/**
+ * One pricing plan card (home page and pricing page). The button depends on who is looking:
+ * guest → register / choose; current plan → renew; higher plan → upgrade; lower plan → included.
+ */
+function PricingCard({ plan, t, language }: { plan: PlanView; t: (typeof translations)[Lang]; language: Lang }) {
+  const { subscription, isLoggedIn } = useBilling()
   const Icon = planIcons[plan.id] ?? Sparkles
-  const target = plan.id === 'free' ? `/start-learning?next=${encodeURIComponent('/courses')}` : `/pricing/checkout/${plan.id}`
-  const cta = plan.id === 'free' ? t.buttons.startFree : plan.id === 'pro' ? t.buttons.choosePro : t.buttons.chooseAiPro
+  const current = isLoggedIn ? accessPlanOf(subscription) : null
+  const isCurrent = current === plan.id
+  const checkoutPath = `/pricing/checkout/${plan.id}`
+
+  let action: React.ReactNode
+  if (plan.id === 'free') {
+    action = !isLoggedIn
+      ? <Link to="/auth?mode=register" className="btn btn-secondary full-width">{t.buttons.startFree} <ArrowRight size={16} /></Link>
+      : <span className="btn btn-secondary full-width is-static" aria-disabled="true"><CheckCircle2 size={16} /> {isCurrent ? pick(language, 'Учурдагы тариф', 'Ваш текущий тариф', 'Your current plan') : pick(language, 'Тарифиңизге кирет', 'Входит в ваш тариф', 'Included in your plan')}</span>
+  } else if (isCurrent) {
+    action = <Link to={checkoutPath} className="btn btn-primary full-width"><RefreshCw size={16} /> {pick(language, 'Узартуу', 'Продлить', 'Renew')}</Link>
+  } else if (current && PLAN_RANK[plan.id] < PLAN_RANK[current]) {
+    action = <span className="btn btn-secondary full-width is-static" aria-disabled="true"><CheckCircle2 size={16} /> {pick(language, 'Тарифиңизге кирет', 'Входит в ваш тариф', 'Included in your plan')}</span>
+  } else {
+    const upgrading = current !== null && current !== 'free'
+    const label = upgrading
+      ? pick(language, `${plan.name} тарифине өтүү`, `Перейти на ${plan.name}`, `Upgrade to ${plan.name}`)
+      : pick(language, 'Тарифти сатып алуу', 'Купить тариф', 'Buy plan')
+    action = <Link to={checkoutPath} className={plan.featured || plan.id === 'aipro' ? 'btn btn-primary full-width' : 'btn btn-secondary full-width'}>{label} <ArrowRight size={16} /></Link>
+  }
+
   return (
-    <div className={['pricing-card', plan.featured ? 'featured' : '', `plan-${plan.id}`].filter(Boolean).join(' ')}>
-      {plan.featured && <span className="popular-badge"><Star size={13} fill="currentColor" /> {pick(language, 'Популярдуу', 'Популярный', 'Popular')}</span>}
+    <div className={['pricing-card', plan.featured ? 'featured' : '', `plan-${plan.id}`, isCurrent ? 'is-current' : ''].filter(Boolean).join(' ')}>
+      {isCurrent
+        ? <span className="popular-badge current"><CheckCircle2 size={13} /> {pick(language, 'Сиздин тариф', 'Ваш тариф', 'Your plan')}</span>
+        : plan.featured && <span className="popular-badge"><Star size={13} fill="currentColor" /> {pick(language, 'Популярдуу', 'Популярный', 'Popular')}</span>}
       <span className="plan-icon"><Icon size={22} /></span>
       <span className="plan-tag">{plan.name}</span>
       <h3>{plan.label[language]}</h3>
-      <div className="price">{plan.price} сом<span> / {t.subscription.monthly}</span></div>
+      <div className="price">{plan.price} {plan.currency === 'KGS' ? 'сом' : plan.currency}<span> / {planPeriodLabel(plan, language, t)}</span></div>
       <p>{plan.description[language]}</p>
       <ul>
         {plan.features[language].map((feature) => <li key={feature}><CheckCircle2 size={16} /> {feature}</li>)}
       </ul>
-      <Link to={target} className={plan.featured || plan.id === 'aipro' ? 'btn btn-primary full-width' : 'btn btn-secondary full-width'}>{cta} <ArrowRight size={16} /></Link>
+      {isCurrent && plan.id !== 'free' && subscription.endsAt && (
+        <p className="plan-current-until">{pick(language, 'Чейин активдүү', 'Активен до', 'Active until')} <strong>{formatDateTime(subscription.endsAt, language)}</strong></p>
+      )}
+      {action}
     </div>
   )
 }
 
-function CheckoutPage({ t, user, onActivatePlan }: { t: (typeof translations)[Lang]; user: UserProfile | null; onActivatePlan?: (planId: SubscriptionPlanId, paymentMethod?: PaymentMethod) => void }) {
+/** Card helpers for the demo checkout (validation happens in the browser; only the last 4 digits are sent). */
+function luhnValid(digits: string) {
+  let sum = 0
+  for (let i = 0; i < digits.length; i++) {
+    let d = Number(digits[digits.length - 1 - i])
+    if (i % 2 === 1) { d *= 2; if (d > 9) d -= 9 }
+    sum += d
+  }
+  return sum % 10 === 0
+}
+function formatCardNumber(value: string) {
+  return value.replace(/\D/g, '').slice(0, 19).replace(/(\d{4})(?=\d)/g, '$1 ')
+}
+function formatExpiry(value: string) {
+  const digits = value.replace(/\D/g, '').slice(0, 4)
+  return digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits
+}
+function expiryValid(value: string) {
+  const match = /^(0[1-9]|1[0-2])\/(\d{2})$/.exec(value)
+  if (!match) return false
+  const now = new Date()
+  return Number(`20${match[2]}`) * 12 + Number(match[1]) >= now.getFullYear() * 12 + now.getMonth() + 1
+}
+function cardBrandOf(digits: string) {
+  if (digits.startsWith('4')) return 'Visa'
+  if (/^(5[1-5]|2[2-7])/.test(digits)) return 'Mastercard'
+  if (digits.startsWith('9417')) return 'Elcart'
+  return 'Card'
+}
+
+type CheckoutPhase ='review' | 'creating' | 'redirecting' | 'checking' | 'pending' | 'paid' | 'failed' | 'cancelled'
+
+function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserProfile | null }) {
   const { planId } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
   const [searchParams] = useSearchParams()
-  const selectedPlan = pricingPlans.find((plan) => plan.id === planId) ?? pricingPlans[1]
-  const [selectedMethod, setSelectedMethod] = useState<PaymentMethod>('MBank')
-  const [orderId, setOrderId] = useState<string | null>(null)
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [isCheckingStatus, setIsCheckingStatus] = useState(false)
-  const [errorNotice, setErrorNotice] = useState<string | null>(null)
-  const [successNotice, setSuccessNotice] = useState<string | null>(null)
-  const [pendingNotice, setPendingNotice] = useState<string | null>(null)
-  const [cancelNotice, setCancelNotice] = useState<string | null>(null)
-  const currentLanguage = useLanguage()
+  const language = useLanguage()
+  const { plans, subscription, refreshSubscription } = useBilling()
+  const plan = plans.find((item) => item.id === planId) ?? null
   const fallbackPath = location.pathname.startsWith('/dashboard') ? '/dashboard/pricing' : '/pricing'
-  const checkoutText = {
-    kg: {
-      buy: `${selectedPlan.name} сатып алуу — ${selectedPlan.price} сом`,
-      buyLoading: 'Буйрутма түзүлүүдө...',
-      checkStatus: 'Төлөм статусун текшерүү',
-      checkingStatus: 'Статус текшерилип жатат...',
-      waitingForPayment: 'Буйрутма түзүлдү. Төлөм барагына өтүүдө...',
-      paymentSuccess: 'Төлөм ырасталды. PRO 30 күнгө активдештирилди.',
-      paymentPending: 'Төлөм күтүлүүдө. Төлөмдү бүтүрүп, статусун текшериңиз.',
-      paymentCancelled: 'Төлөм жокко чыгарылды.',
-      methodTitle: 'Төлөм ыкмасын тандаңыз',
-      titlePlan: 'Тариф',
-      titleAmount: 'Сумма',
-      titlePeriod: 'Мөөнөт',
-      periodValue: '30 күн'
-    },
-    ru: {
-      buy: `Купить ${selectedPlan.name} — ${selectedPlan.price} сом`,
-      buyLoading: 'Создаём заказ...',
-      checkStatus: 'Проверить статус оплаты',
-      checkingStatus: 'Проверяем статус...',
-      waitingForPayment: 'Заказ создан. Переходим на страницу оплаты...',
-      paymentSuccess: 'Оплата подтверждена. PRO активирован на 30 дней.',
-      paymentPending: 'Платёж ожидается. Завершите оплату и проверьте статус.',
-      paymentCancelled: 'Платёж отменён.',
-      methodTitle: 'Выберите способ оплаты',
-      titlePlan: 'Тариф',
-      titleAmount: 'Сумма',
-      titlePeriod: 'Срок',
-      periodValue: '30 дней'
-    },
-    en: {
-      buy: `Buy ${selectedPlan.name} — ${selectedPlan.price} KGS`,
-      buyLoading: 'Creating order...',
-      checkStatus: 'Check payment status',
-      checkingStatus: 'Checking status...',
-      waitingForPayment: 'Order created. Redirecting to payment page...',
-      paymentSuccess: 'Payment confirmed. PRO is active for 30 days.',
-      paymentPending: 'Payment is pending. Complete the payment and check status.',
-      paymentCancelled: 'Payment was cancelled.',
-      methodTitle: 'Choose payment method',
-      titlePlan: 'Plan',
-      titleAmount: 'Amount',
-      titlePeriod: 'Period',
-      periodValue: '30 days'
-    }
-  }[currentLanguage]
+  const [method, setMethod] = useState<PaymentMethod>('MBank')
+  const [confirmed, setConfirmed] = useState(false)
+  const [phase, setPhase] = useState<CheckoutPhase>('review')
+  const [orderId, setOrderId] = useState<string | null>(() => searchParams.get('orderId'))
+  const [error, setError] = useState<string | null>(null)
+  const pollRef = useRef(0)
+  // Purchase form. Demo card checkout: the card number is validated here and only its last 4 digits
+  // (+ expiry) are sent to the server; CVV is not asked. A bank transfer needs only payer name + reference.
+  const [payMode, setPayMode] = useState<'card' | 'online' | 'bank'>('card')
+  const [demoEnabled, setDemoEnabled] = useState<boolean | null>(null)
+  const [cardNumber, setCardNumber] = useState('')
+  const [cardExpiry, setCardExpiry] = useState('')
+  const [fullName, setFullName] = useState(user?.name ?? '')
+  const [payerName, setPayerName] = useState('')
+  const [paymentReference, setPaymentReference] = useState('')
+  const [receiptNote, setReceiptNote] = useState('')
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  const [manualConfig, setManualConfig] = useState<ManualTransferConfig | null>(null)
+  const [orderProvider, setOrderProvider] = useState<string | null>(null)
+  const [reviewNote, setReviewNote] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!user) navigate('/auth')
-  }, [navigate, user])
+    let active = true
+    getManualTransferConfig().then((cfg) => { if (active) setManualConfig(cfg) }).catch(() => { if (active) setManualConfig({ enabled: false }) })
+    getDemoPaymentConfig().then((cfg) => {
+      if (!active) return
+      setDemoEnabled(cfg.enabled)
+      if (!cfg.enabled) setPayMode('online')
+    }).catch(() => { if (active) { setDemoEnabled(false); setPayMode('online') } })
+    return () => { active = false }
+  }, [])
 
-  const checkOrderStatus = useCallback(async (targetOrderId?: string) => {
-    if (!user?.email) {
-      navigate('/auth')
-      return
+  const current = accessPlanOf(subscription)
+  const kind: 'new' | 'renewal' | 'upgrade' | 'included' = !plan || plan.id === 'free'
+    ? 'included'
+    : current === plan.id ? 'renewal' : PLAN_RANK[plan.id] < PLAN_RANK[current] ? 'included' : current === 'free' ? 'new' : 'upgrade'
+  const currency = plan?.currency === 'KGS' ? 'сом' : plan?.currency ?? ''
+  const newEndDate = plan
+    ? new Date((kind === 'renewal' && subscription.endsAt ? new Date(subscription.endsAt).getTime() : Date.now()) + plan.durationDays * 24 * 60 * 60 * 1000).toISOString()
+    : null
+
+  const errorText = (err: unknown) => {
+    if (err instanceof ApiError) {
+      if (err.code === 'PAYMENT_NOT_CONFIGURED') return pick(language, 'Онлайн-төлөм азырынча туташтырыла элек. Кийинчерээк кайра аракет кылыңыз же колдоо кызматына жазыңыз.', 'Онлайн-оплата пока не подключена. Попробуйте позже или напишите в поддержку.', 'Online payment is not connected yet. Please try again later or contact support.')
+      if (err.code === 'PLAN_INCLUDED') return pick(language, 'Бул тариф учурдагы тарифиңизге кирет.', 'Этот тариф уже входит в ваш текущий тариф.', 'This plan is already included in your current plan.')
+      if (err.code === 'PLAN_DISABLED') return pick(language, 'Бул тариф азыр жеткиликсиз.', 'Этот тариф сейчас недоступен.', 'This plan is not available right now.')
+      if (err.code === 'PROVIDER_ERROR') return pick(language, 'Төлөм системасы жооп бербей жатат. Бир аздан кийин кайра аракет кылыңыз.', 'Платёжная система не отвечает. Попробуйте чуть позже.', 'The payment system is not responding. Please try again shortly.')
+      if (err.code === 'MISSING_FIELDS') return pick(language, 'Бардык милдеттүү талааларды толтуруңуз.', 'Заполните все обязательные поля.', 'Please fill in all required fields.')
+      if (err.code === 'INVALID_EMAIL' || err.code === 'EMAIL_MISMATCH') return pick(language, 'Email туура эмес же аккаунтуңузга дал келбейт.', 'Неверный email или он не совпадает с вашим аккаунтом.', 'The email is invalid or does not match your account.')
+      if (err.code === 'INVALID_REFERENCE') return pick(language, 'Төлөмдүн номери туура эмес (4–64 белги: тамгалар, сандар, «-»).', 'Неверный номер платежа (4–64 символа: буквы, цифры, «-»).', 'Invalid payment reference (4–64 characters: letters, digits, "-").')
+      if (err.code === 'CARD_DATA_REJECTED') return pick(language, 'Карта номерин жазбаңыз — банктагы төлөмдүн номерин гана көрсөтүңүз.', 'Не вводите номер карты — укажите только номер платежа из банка.', 'Do not enter a card number — use the bank transaction reference only.')
+      if (err.code === 'DUPLICATE_REFERENCE') return pick(language, 'Бул төлөм номери мурун эле жөнөтүлгөн.', 'Этот номер платежа уже был отправлен.', 'This payment reference has already been submitted.')
+      if (err.code === 'MANUAL_PENDING_EXISTS') return pick(language, 'Сизде текшерүүнү күтүп жаткан которуу бар. Администратордун жообун күтүңүз.', 'У вас уже есть перевод, ожидающий проверки. Дождитесь решения администратора.', 'You already have a transfer awaiting review. Please wait for the administrator.')
+      if (err.code === 'INVALID_EXPIRY') return pick(language, 'Картанын мөөнөтү туура эмес же өтүп кеткен.', 'Неверный или истёкший срок действия карты.', 'The card expiry date is invalid or in the past.')
+      if (err.code === 'DUPLICATE_SUBMIT') return pick(language, 'Төлөм жаңы эле жөнөтүлдү. Жеке кабинетти текшериңиз.', 'Оплата только что отправлена. Проверьте личный кабинет.', 'The payment was just submitted. Please check your dashboard.')
+      if (err.code === 'DEMO_DISABLED') return pick(language, 'Карта менен төлөө азыр өчүрүлгөн.', 'Оплата картой сейчас отключена.', 'Card payment is turned off right now.')
+      if (err.code === 'MANUAL_NOT_CONFIGURED') return pick(language, 'Банктык которуу азыр жеткиликсиз.', 'Банковский перевод сейчас недоступен.', 'Bank transfer is not available right now.')
+      if (err.status === 401) return pick(language, 'Сессия бүттү. Кайра кириңиз.', 'Сессия истекла. Войдите снова.', 'Your session has expired. Please log in again.')
+      return err.message
     }
+    if (isNetworkError(err)) return pick(language, 'Сервер азыр жооп бербей жатат. Бир мүнөттөн кийин кайра аракет кылыңыз.', 'Сервер сейчас не отвечает. Попробуйте через минуту.', 'The server is not responding. Please try again in a minute.')
+    return err instanceof Error ? err.message : String(err)
+  }
 
-    const resolvedOrderId = targetOrderId ?? orderId
-    if (!resolvedOrderId) return
-
-    setIsCheckingStatus(true)
-    setErrorNotice(null)
+  const checkStatus = useCallback(async (id: string) => {
+    setPhase('checking')
+    setError(null)
     try {
-      const order = await getPaymentOrderStatus(resolvedOrderId)
-      setOrderId(order.orderId)
-
+      const order = await getPaymentOrderStatus(id)
+      setOrderProvider(order.provider ?? null)
+      setReviewNote(order.reviewNote ?? null)
       if (order.status === 'paid' && order.activated) {
-        onActivatePlan?.(order.planId, order.paymentMethod)
-        setSuccessNotice(checkoutText.paymentSuccess)
-        setPendingNotice(null)
-        setCancelNotice(null)
-      } else if (order.status === 'cancelled') {
-        setCancelNotice(checkoutText.paymentCancelled)
-        setSuccessNotice(null)
-        setPendingNotice(null)
-      } else {
-        setPendingNotice(checkoutText.paymentPending)
-        setSuccessNotice(null)
-        setCancelNotice(null)
+        await refreshSubscription()
+        setPhase('paid')
+        return 'done'
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      setErrorNotice(message)
-    } finally {
-      setIsCheckingStatus(false)
+      if (order.status === 'failed') { setPhase('failed'); return 'done' }
+      if (order.status === 'cancelled') { setPhase('cancelled'); return 'done' }
+      setPhase('pending')
+      return 'pending'
+    } catch (err) {
+      setError(errorText(err))
+      setPhase('pending')
+      return 'pending'
     }
-  }, [checkoutText.paymentCancelled, checkoutText.paymentPending, checkoutText.paymentSuccess, navigate, onActivatePlan, orderId, user?.email])
+    // errorText only depends on the language
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshSubscription, language])
 
+  // Returning from the payment page: poll the server (the provider's webhook activates the plan).
   useEffect(() => {
-    const orderIdFromUrl = searchParams.get('orderId')
-    const statusFromUrl = searchParams.get('paymentStatus') ?? searchParams.get('status')
-    if (orderIdFromUrl) setOrderId(orderIdFromUrl)
-
-    if (!statusFromUrl) return
-    const normalized = statusFromUrl.toLowerCase()
-    if (normalized === 'cancel' || normalized === 'cancelled' || normalized === 'canceled') {
-      setCancelNotice(checkoutText.paymentCancelled)
-      setSuccessNotice(null)
-      setPendingNotice(null)
-    } else if ((normalized === 'success' || normalized === 'paid' || normalized === 'succeeded') && orderIdFromUrl) {
-      void checkOrderStatus(orderIdFromUrl)
+    if (!orderId || !user) return
+    let stopped = false
+    pollRef.current = 0
+    const tick = async () => {
+      if (stopped) return
+      const result = await checkStatus(orderId)
+      pollRef.current += 1
+      // Online payments confirm within minutes; a bank transfer waits for the administrator, so poll slower.
+      if (result === 'pending' && pollRef.current < 40 && !stopped) window.setTimeout(() => { void tick() }, pollRef.current > 10 ? 15000 : 3000)
     }
-  }, [checkOrderStatus, checkoutText.paymentCancelled, searchParams])
+    void tick()
+    return () => { stopped = true }
+  }, [orderId, user, checkStatus])
 
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault()
-    if (!user) {
-      navigate('/auth')
+  const validateForm = () => {
+    const errors: Record<string, string> = {}
+    const required = pick(language, 'Милдеттүү талаа', 'Обязательное поле', 'Required field')
+    if (fullName.trim().length < 2) errors.fullName = required
+    if (!user?.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.email)) errors.email = pick(language, 'Email туура эмес', 'Неверный email', 'Invalid email')
+    if (payMode === 'card') {
+      const digits = cardNumber.replace(/\D/g, '')
+      if (!digits) errors.cardNumber = required
+      else if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) errors.cardNumber = pick(language, 'Карта номери туура эмес', 'Неверный номер карты', 'Invalid card number')
+      if (!cardExpiry) errors.expiry = required
+      else if (!expiryValid(cardExpiry)) errors.expiry = pick(language, 'Мөөнөтү туура эмес же өтүп кеткен (АА/ЖЖ)', 'Неверный или истёкший срок (ММ/ГГ)', 'Invalid or expired date (MM/YY)')
+    }
+    if (payMode === 'bank') {
+      if (payerName.trim().length < 2) errors.payerName = required
+      if (!paymentReference.trim()) errors.paymentReference = required
+      else if (!/^[A-Za-z0-9][A-Za-z0-9\-_/.# ]{3,63}$/.test(paymentReference.trim())) errors.paymentReference = pick(language, '4–64 белги: тамгалар, сандар, «-»', '4–64 символа: буквы, цифры, «-»', '4–64 characters: letters, digits, "-"')
+      else if (/(?:\d[ -]?){13,19}/.test(paymentReference)) errors.paymentReference = pick(language, 'Карта номерин жазбаңыз', 'Не вводите номер карты', 'Do not enter a card number')
+    }
+    if (!confirmed) errors.confirm = pick(language, 'Сатып алууну ырастаңыз', 'Подтвердите покупку', 'Please confirm the purchase')
+    setFieldErrors(errors)
+    return Object.keys(errors).length === 0
+  }
+
+  const submitPurchase = async (event?: React.FormEvent) => {
+    event?.preventDefault()
+    if (!user || !plan || kind === 'included') return
+    setError(null)
+    if (!validateForm()) {
+      setError(pick(language, 'Маалымат толук эмес — белгиленген талааларды текшериңиз.', 'Не хватает данных — проверьте отмеченные поля.', 'Some information is missing — check the highlighted fields.'))
       return
     }
-
-    setErrorNotice(null)
-    setSuccessNotice(null)
-    setPendingNotice(null)
-    setCancelNotice(null)
-    setIsSubmitting(true)
-
+    setPhase('creating')
     try {
-      const createdOrder = await createPaymentOrder({
-        userEmail: user.email,
-        userName: user.name,
-        planId: selectedPlan.id as SubscriptionPlanId,
-        paymentMethod: selectedMethod
-      })
-      setOrderId(createdOrder.orderId)
-      setPendingNotice(checkoutText.waitingForPayment)
-      window.location.assign(createdOrder.paymentUrl)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      setErrorNotice(message)
-    } finally {
-      setIsSubmitting(false)
+      if (payMode === 'card') {
+        const digits = cardNumber.replace(/\D/g, '')
+        await submitDemoCardPayment({ planId: plan.id, fullName: fullName.trim(), email: user.email, cardLast4: digits.slice(-4), cardBrand: cardBrandOf(digits), expiry: cardExpiry })
+        // The full number is not kept anywhere once the payment is done.
+        setCardNumber('')
+        setCardExpiry('')
+        await refreshSubscription()
+        setPhase('paid')
+        return
+      }
+      if (payMode === 'bank') {
+        const created = await submitManualTransfer({ planId: plan.id, fullName: fullName.trim(), email: user.email, payerName: payerName.trim(), paymentReference: paymentReference.trim(), receiptNote: receiptNote.trim() || undefined })
+        setOrderProvider('manual')
+        setOrderId(created.orderId)
+        setPhase('pending')
+        void refreshSubscription()
+        return
+      }
+      const created = await createPaymentOrder({ userEmail: user.email, userName: fullName.trim() || user.name, planId: plan.id, paymentMethod: method })
+      setOrderId(created.orderId)
+      setPhase('redirecting')
+      window.location.assign(created.paymentUrl)
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'DUPLICATE_REFERENCE') setFieldErrors({ paymentReference: errorText(err) })
+      setError(errorText(err))
+      setPhase('review')
     }
   }
 
+  if (!plan || plan.id === 'free') {
+    return (
+      <div className="container section page-block checkout-page">
+        <PageHero back={<SmartBackButton fallback={fallbackPath} label={pick(language, 'Кайтуу', 'Назад', 'Back')} />} eyebrow={pick(language, 'Төлөм', 'Оплата', 'Checkout')} title={pick(language, 'Тариф табылган жок', 'Тариф не найден', 'Plan not found')} subtitle={pick(language, 'Бул тариф жок же азыр жеткиликсиз.', 'Такого тарифа нет или он сейчас недоступен.', 'This plan does not exist or is not available right now.')} actions={<ButtonLink to={fallbackPath} icon={ArrowLeft}>{pick(language, 'Тарифтерге', 'К тарифам', 'To plans')}</ButtonLink>} />
+      </div>
+    )
+  }
+
+  const methods: Array<{ id: PaymentMethod; label: string }> = [
+    { id: 'MBank', label: 'MBank' },
+    { id: 'O!Деньги', label: 'O!Деньги' },
+    { id: 'Элсом', label: 'Элсом' }
+  ]
+  const pendingForThisPlan = subscription.pendingOrder && subscription.pendingOrder.planId === plan.id && !orderId ? subscription.pendingOrder : null
+
   return (
     <div className="container section page-block checkout-page">
-      <div className="page-top-actions checkout-top-actions">
-        <SmartBackButton fallback={fallbackPath} label={currentLanguage === 'ru' ? 'Назад' : currentLanguage === 'kg' ? 'Кайтуу' : 'Back'} />
-      </div>
-      <div className="checkout-card dark-checkout-card">
-        <div className="checkout-brand">LEVEL UP</div>
-        <span className="checkout-plan-chip">{selectedPlan.name}</span>
-        <h1 className="checkout-title">{selectedPlan.label[currentLanguage]}</h1>
+      <PageHero
+        back={<SmartBackButton fallback={fallbackPath} label={pick(language, 'Кайтуу', 'Назад', 'Back')} />}
+        eyebrow={pick(language, 'Төлөм', 'Оформление', 'Checkout')}
+        title={`${plan.name} — ${plan.label[language]}`}
+        subtitle={plan.description[language]}
+      />
 
-        <p className="checkout-price-line">
-          {t.subscription.duration}: <strong>{selectedPlan.price} сом</strong>
-        </p>
+      <div className="checkout-layout">
+        <section className="ui-card checkout-summary" aria-label={pick(language, 'Буйрутма', 'Заказ', 'Order')}>
+          <h2>{pick(language, 'Буйрутма', 'Ваш заказ', 'Your order')}</h2>
+          <dl className="checkout-lines">
+            <div><dt>{pick(language, 'Тариф', 'Тариф', 'Plan')}</dt><dd>{plan.name}</dd></div>
+            <div><dt>{pick(language, 'Мөөнөт', 'Срок', 'Period')}</dt><dd>{pick(language, `${plan.durationDays} күн`, `${plan.durationDays} дней`, `${plan.durationDays} days`)}</dd></div>
+            <div><dt>{pick(language, 'Учурдагы тариф', 'Текущий тариф', 'Current plan')}</dt><dd>{PLAN_META[current].name}</dd></div>
+            <div><dt>{pick(language, 'Жаңы бүтүү күнү', 'Новая дата окончания', 'New end date')}</dt><dd>{kind === 'included' ? '—' : formatDateTime(newEndDate, language)}</dd></div>
+            <div className="checkout-total"><dt>{pick(language, 'Төлөөгө', 'К оплате', 'Total')}</dt><dd>{plan.price} {currency}</dd></div>
+          </dl>
+          <p className="checkout-kind">
+            {kind === 'renewal' && pick(language, `Учурдагы ${plan.name} тарифиңизге ${plan.durationDays} күн кошулат.`, `К текущему тарифу ${plan.name} добавятся ${plan.durationDays} дней.`, `${plan.durationDays} days will be added to your current ${plan.name} plan.`)}
+            {kind === 'upgrade' && pick(language, `${plan.name} төлөм ырасталгандан кийин дароо башталат жана учурдагы ${PLAN_META[current].name} тарифин алмаштырат.`, `${plan.name} начнёт действовать сразу после подтверждения оплаты и заменит текущий ${PLAN_META[current].name}.`, `${plan.name} starts as soon as the payment is confirmed and replaces your current ${PLAN_META[current].name}.`)}
+            {kind === 'new' && pick(language, 'Тариф төлөм ырасталгандан кийин гана активдешет.', 'Тариф активируется только после подтверждения оплаты.', 'The plan is activated only after the payment is confirmed.')}
+            {kind === 'included' && pick(language, 'Бул тариф учурдагы тарифиңизге кирет — сатып алуунун кереги жок.', 'Этот тариф уже входит в ваш текущий — покупать не нужно.', 'This plan is already included in your current plan — no need to buy it.')}
+          </p>
+        </section>
 
-        <div className="checkout-plan-meta">
-          <div className="checkout-meta-row">
-            <span>{checkoutText.titlePlan}</span>
-            <strong>{selectedPlan.name}</strong>
-          </div>
-          <div className="checkout-meta-row">
-            <span>{checkoutText.titleAmount}</span>
-            <strong>{selectedPlan.price} сом</strong>
-          </div>
-          <div className="checkout-meta-row">
-            <span>{checkoutText.titlePeriod}</span>
-            <strong>{checkoutText.periodValue}</strong>
-          </div>
-        </div>
+        <section className="ui-card checkout-pay" aria-label={pick(language, 'Төлөм', 'Оплата', 'Payment')}>
+          {phase === 'paid' ? (
+            <div className="checkout-result success" role="status">
+              <CheckCircle2 size={36} />
+              <h2>{pick(language, 'Төлөм ырасталды', 'Оплата подтверждена', 'Payment confirmed')}</h2>
+              <p>{pick(language, `${plan.name} тарифи активдүү`, `Тариф ${plan.name} активен`, `${plan.name} is active`)} · {pick(language, 'чейин', 'до', 'until')} {formatDateTime(subscription.endsAt, language)}</p>
+              <div className="checkout-result-actions">
+                <ButtonLink to="/dashboard" icon={LayoutDashboard}>{pick(language, 'Жеке кабинет', 'Личный кабинет', 'Dashboard')}</ButtonLink>
+                {plan.id === 'aipro' && <ButtonLink to="/dashboard/ai" variant="secondary" icon={Bot}>AI Assistant</ButtonLink>}
+              </div>
+            </div>
+          ) : phase === 'failed' || phase === 'cancelled' ? (
+            <div className="checkout-result error" role="alert">
+              <X size={36} />
+              <h2>{phase === 'failed' ? pick(language, 'Төлөм өтпөй калды', 'Оплата не прошла', 'Payment failed') : pick(language, 'Төлөм жокко чыгарылды', 'Оплата отменена', 'Payment cancelled')}</h2>
+              {orderProvider === 'manual'
+                ? <p>{pick(language, 'Администратор которууну ырастаган жок, тариф өзгөргөн жок.', 'Администратор не подтвердил перевод, тариф не изменился.', 'The administrator did not confirm the transfer; your plan did not change.')}{reviewNote ? ` ${pick(language, 'Себеби', 'Причина', 'Reason')}: ${reviewNote}` : ''}</p>
+                : <p>{pick(language, 'Акча алынган жок, тариф өзгөргөн жок. Кайра аракет кылсаңыз болот.', 'Деньги не списаны, тариф не изменился. Можно попробовать ещё раз.', 'No money was taken and your plan did not change. You can try again.')}</p>}
+              <Button icon={RefreshCw} onClick={() => { setOrderId(null); setPhase('review'); navigate(location.pathname, { replace: true }) }}>{pick(language, 'Кайра аракет кылуу', 'Попробовать снова', 'Try again')}</Button>
+            </div>
+          ) : orderId && (phase === 'pending' || phase === 'checking') ? (
+            <div className="checkout-result pending" role="status" aria-live="polite">
+              <Clock3 size={36} />
+              {orderProvider === 'manual' ? (
+                <>
+                  <h2>{pick(language, 'Өтүнмө жөнөтүлдү — текшерүү күтүлүүдө', 'Заявка отправлена — ожидает проверки', 'Request sent — awaiting review')}</h2>
+                  <p>{pick(language, 'Статус: PENDING. Администратор которууну текшергенден кийин тариф активдешет. Бул баракты жаап, кийинчерээк жеке кабинеттен текшерсеңиз болот.', 'Статус: PENDING. Тариф активируется после того, как администратор проверит перевод. Можно закрыть страницу и проверить позже в личном кабинете.', 'Status: PENDING. The plan activates after the administrator verifies the transfer. You can close this page and check later in your dashboard.')}</p>
+                </>
+              ) : (
+                <>
+                  <h2>{pick(language, 'Төлөм күтүлүүдө', 'Ожидаем подтверждение оплаты', 'Waiting for payment confirmation')}</h2>
+                  <p>{pick(language, 'Төлөм системасы төлөмдү ырастаганда тариф өзү активдешет. Бул баракта статус автоматтык түрдө жаңыланат.', 'Тариф активируется автоматически, когда платёжная система подтвердит оплату. Статус на этой странице обновляется сам.', 'The plan activates automatically once the payment system confirms the payment. This page updates by itself.')}</p>
+                </>
+              )}
+              <Button variant="secondary" icon={RefreshCw} disabled={phase === 'checking'} onClick={() => { void checkStatus(orderId) }}>{phase === 'checking' ? pick(language, 'Текшерилүүдө...', 'Проверяем...', 'Checking...') : pick(language, 'Статусту текшерүү', 'Проверить статус', 'Check status')}</Button>
+              {error && <p className="error-message">{error}</p>}
+            </div>
+          ) : (
+            <form className="checkout-form" noValidate onSubmit={(event) => { void submitPurchase(event) }}>
+              <h2>{pick(language, 'Сатып алуучунун маалыматы', 'Данные покупателя', 'Customer information')}</h2>
+              <div className="checkout-fields">
+                <label className={fieldErrors.fullName ? 'checkout-field has-error' : 'checkout-field'}>
+                  <span>{pick(language, 'Толук аты-жөнү', 'ФИО', 'Full name')} *</span>
+                  <input type="text" autoComplete="name" maxLength={120} value={fullName} onChange={(event) => setFullName(event.target.value)} aria-invalid={!!fieldErrors.fullName} />
+                  {fieldErrors.fullName && <small className="field-error">{fieldErrors.fullName}</small>}
+                </label>
+                <label className={fieldErrors.email ? 'checkout-field has-error' : 'checkout-field'}>
+                  <span>Email</span>
+                  <input type="email" value={user?.email ?? ''} readOnly aria-readonly="true" aria-invalid={!!fieldErrors.email} />
+                  {fieldErrors.email && <small className="field-error">{fieldErrors.email}</small>}
+                </label>
+              </div>
 
-        <form className="checkout-form dark-checkout-form" onSubmit={handleSubmit}>
-          <label className="checkout-select-label">
-            <span>{checkoutText.methodTitle}</span>
-            <select value={selectedMethod} onChange={(event) => setSelectedMethod(event.target.value as PaymentMethod)}>
-              <option value="MBank">MBank</option>
-              <option value="O!Деньги">O!Деньги</option>
-              <option value="Элсом">Элсом</option>
-            </select>
-          </label>
-
-          <button type="submit" className="btn btn-primary full-width checkout-submit-btn" disabled={isSubmitting}>
-            {isSubmitting ? checkoutText.buyLoading : checkoutText.buy}
-          </button>
-
-          {orderId && (
-            <button
-              type="button"
-              className="btn btn-secondary full-width checkout-status-btn"
-              onClick={() => { void checkOrderStatus() }}
-              disabled={isCheckingStatus}
-            >
-              {isCheckingStatus ? checkoutText.checkingStatus : checkoutText.checkStatus}
-            </button>
+              <h2>{pick(language, 'Төлөм ыкмасы', 'Способ оплаты', 'Payment method')}</h2>
+              <div className="payment-mode-switch" role="radiogroup" aria-label={pick(language, 'Төлөм түрү', 'Тип оплаты', 'Payment type')}>
+                {demoEnabled ? (
+                  <button type="button" role="radio" aria-checked={payMode === 'card'} className={payMode === 'card' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('card')} disabled={kind === 'included'}>
+                    <CreditCard size={20} /><span>{pick(language, 'Банк картасы', 'Банковская карта', 'Bank card')}</span>
+                  </button>
+                ) : (
+                  <button type="button" role="radio" aria-checked={payMode === 'online'} className={payMode === 'online' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('online')} disabled={kind === 'included'}>
+                    <WalletCards size={20} /><span>{pick(language, 'Онлайн-төлөм', 'Онлайн-оплата', 'Online payment')}</span>
+                  </button>
+                )}
+                {manualConfig?.enabled && (
+                  <button type="button" role="radio" aria-checked={payMode === 'bank'} className={payMode === 'bank' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('bank')} disabled={kind === 'included'}>
+                    <Building2 size={20} /><span>{pick(language, 'Банктык которуу', 'Банковский перевод', 'Bank transfer')}</span>
+                  </button>
+                )}
+              </div>
+              {pendingForThisPlan && (
+                <div className="checkout-pending-note" role="status">
+                  <Clock3 size={18} />
+                  <span>{pendingForThisPlan.provider === 'manual'
+                    ? pick(language, 'Бул тариф үчүн которууңуз текшерүүдө.', 'Ваш перевод за этот тариф ожидает проверки.', 'Your transfer for this plan is awaiting review.')
+                    : pick(language, 'Бул тариф үчүн бүтпөгөн төлөм бар.', 'У вас есть незавершённая оплата этого тарифа.', 'You have an unfinished payment for this plan.')}</span>
+                  <button type="button" className="text-button" onClick={() => setOrderId(pendingForThisPlan.orderId)}>{pick(language, 'Статусту текшерүү', 'Проверить статус', 'Check status')}</button>
+                </div>
+              )}
+              {payMode === 'card' ? (
+                <>
+                  <div className="checkout-fields">
+                    <label className={fieldErrors.cardNumber ? 'checkout-field wide has-error' : 'checkout-field wide'}>
+                      <span>{pick(language, 'Карта номери', 'Номер карты', 'Card number')} *</span>
+                      <input type="text" inputMode="numeric" autoComplete="cc-number" placeholder="0000 0000 0000 0000" maxLength={23} value={cardNumber} onChange={(event) => setCardNumber(formatCardNumber(event.target.value))} aria-invalid={!!fieldErrors.cardNumber} />
+                      {fieldErrors.cardNumber && <small className="field-error">{fieldErrors.cardNumber}</small>}
+                    </label>
+                    <label className={fieldErrors.expiry ? 'checkout-field has-error' : 'checkout-field'}>
+                      <span>{pick(language, 'Жарактуулук мөөнөтү', 'Срок действия', 'Expiry date')} *</span>
+                      <input type="text" inputMode="numeric" autoComplete="cc-exp" placeholder={pick(language, 'АА/ЖЖ', 'ММ/ГГ', 'MM/YY')} maxLength={5} value={cardExpiry} onChange={(event) => setCardExpiry(formatExpiry(event.target.value))} aria-invalid={!!fieldErrors.expiry} />
+                      {fieldErrors.expiry && <small className="field-error">{fieldErrors.expiry}</small>}
+                    </label>
+                  </div>
+                  <p className="checkout-demo-note">{pick(language, 'Демо-төлөм: акча алынбайт, тариф дароо активдешет.', 'Демо-оплата: деньги не списываются, тариф активируется сразу.', 'Demo payment: no money is charged, the plan activates immediately.')}</p>
+                </>
+              ) : payMode === 'online' ? (
+                <>
+                  <p className="checkout-subtitle">{pick(language, 'Төлөм системасын тандаңыз', 'Выберите платёжную систему', 'Choose a payment provider')}</p>
+                  <div className="payment-methods" role="radiogroup" aria-label={pick(language, 'Төлөм системасы', 'Платёжная система', 'Payment provider')}>
+                    {methods.map((item) => (
+                      <button key={item.id} type="button" role="radio" aria-checked={method === item.id} className={method === item.id ? 'payment-method active' : 'payment-method'} onClick={() => setMethod(item.id)} disabled={kind === 'included'}>
+                        <WalletCards size={20} /><span>{item.label}</span>{method === item.id && <CheckCircle2 size={18} />}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : manualConfig?.enabled && (
+                <>
+                  <div className="bank-details" aria-label={pick(language, 'Которуу үчүн реквизиттер', 'Реквизиты для перевода', 'Transfer details')}>
+                    {manualConfig.bankName && <div><span>{pick(language, 'Банк', 'Банк', 'Bank')}</span><strong>{manualConfig.bankName}</strong></div>}
+                    {manualConfig.recipient && <div><span>{pick(language, 'Алуучу', 'Получатель', 'Recipient')}</span><strong>{manualConfig.recipient}</strong></div>}
+                    <div><span>{pick(language, 'Эсеп / номер', 'Счёт / номер', 'Account / number')}</span><strong>{manualConfig.account}</strong></div>
+                    <div><span>{pick(language, 'Сумма', 'Сумма', 'Amount')}</span><strong>{plan.price} {currency}</strong></div>
+                    {subscription.accountId && <div><span>{pick(language, 'Төлөмдүн комментарийи', 'Комментарий к платежу', 'Payment comment')}</span><strong>LevelUp {subscription.accountId} {plan.name}</strong></div>}
+                    {manualConfig.instructions && <p>{manualConfig.instructions}</p>}
+                  </div>
+                  <div className="checkout-fields">
+                    <label className={fieldErrors.payerName ? 'checkout-field has-error' : 'checkout-field'}>
+                      <span>{pick(language, 'Төлөөчүнүн аты-жөнү', 'ФИО плательщика', 'Payer name')} *</span>
+                      <input type="text" maxLength={120} value={payerName} onChange={(event) => setPayerName(event.target.value)} aria-invalid={!!fieldErrors.payerName} />
+                      {fieldErrors.payerName && <small className="field-error">{fieldErrors.payerName}</small>}
+                    </label>
+                    <label className={fieldErrors.paymentReference ? 'checkout-field has-error' : 'checkout-field'}>
+                      <span>{pick(language, 'Төлөмдүн номери (чектен)', 'Номер платежа (из чека)', 'Payment reference (from receipt)')} *</span>
+                      <input type="text" maxLength={64} autoComplete="off" value={paymentReference} onChange={(event) => setPaymentReference(event.target.value)} aria-invalid={!!fieldErrors.paymentReference} />
+                      {fieldErrors.paymentReference && <small className="field-error">{fieldErrors.paymentReference}</small>}
+                    </label>
+                    <label className="checkout-field wide">
+                      <span>{pick(language, 'Чек боюнча комментарий (милдеттүү эмес)', 'Комментарий к чеку (необязательно)', 'Receipt note (optional)')}</span>
+                      <input type="text" maxLength={300} value={receiptNote} onChange={(event) => setReceiptNote(event.target.value)} />
+                    </label>
+                  </div>
+                </>
+              )}
+              <label className={fieldErrors.confirm ? 'checkout-confirm has-error' : 'checkout-confirm'}>
+                <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={kind === 'included'} />
+                <span>{pick(language, `${plan.name} тарифин ${plan.price} ${currency} суммасына сатып алууну ырастайм.`, `Подтверждаю покупку тарифа ${plan.name} на сумму ${plan.price} ${currency}.`, `I confirm the purchase of ${plan.name} for ${plan.price} ${currency}.`)}</span>
+              </label>
+              <Button type="submit" block size="lg" icon={ShieldCheck} disabled={kind === 'included' || phase === 'creating' || phase === 'redirecting'}>
+                {phase === 'creating' ? pick(language, 'Жөнөтүлүүдө...', 'Отправляем...', 'Sending...') : phase === 'redirecting' ? pick(language, 'Төлөм барагына өтүүдө...', 'Переходим к оплате...', 'Redirecting to payment...') : `${payMode === 'card' ? pick(language, 'Төлөө', 'Оплатить', 'Pay') : pick(language, 'Жөнөтүү', 'Отправить', 'Submit')} — ${plan.price} ${currency}`}
+              </Button>
+              {error && <p className="error-message" role="alert">{error}</p>}
+              <p className="checkout-secure"><Lock size={14} /> {payMode === 'card'
+                ? pick(language, 'Карта номери сакталбайт жана серверге жөнөтүлбөйт — акыркы 4 сан гана колдонулат. CVV суралбайт.', 'Номер карты не сохраняется и не отправляется на сервер — используются только последние 4 цифры. CVV не запрашивается.', 'The card number is not stored or sent to the server — only the last 4 digits are used. CVV is not requested.')
+                : payMode === 'bank'
+                ? pick(language, 'Карта номерин, CVV же мөөнөтүн эч качан жазбаңыз. Тариф администратор которууну ырастагандан кийин гана активдешет.', 'Никогда не вводите номер карты, CVV или срок действия. Тариф активируется только после того, как администратор подтвердит перевод.', 'Never enter a card number, CVV or expiry date. The plan activates only after the administrator confirms the transfer.')
+                : pick(language, 'Төлөм төлөм системасынын барагында өтөт. LevelUp карта маалыматтарын сактабайт.', 'Оплата проходит на странице платёжной системы. LevelUp не хранит данные карт.', 'Payment happens on the payment system’s page. LevelUp does not store card details.')}</p>
+              <Link to={fallbackPath} className="text-link">{t.sections.choosePlanShort}</Link>
+            </form>
           )}
-
-          <button type="button" className="btn btn-secondary full-width checkout-back-btn" onClick={() => navigate(fallbackPath)}>
-            {t.sections.choosePlanShort}
-          </button>
-
-          {pendingNotice && <p className="success-message">{pendingNotice}</p>}
-          {successNotice && <p className="success-message">{successNotice}</p>}
-          {cancelNotice && <p className="cancel-message">{cancelNotice}</p>}
-          {errorNotice && <p className="error-message">{errorNotice}</p>}
-        </form>
+        </section>
       </div>
     </div>
   )
@@ -4034,7 +4479,10 @@ function AIChatPanel({ language, subscription, userEmail, pricingPath }: { langu
     setIsLoading(true)
 
     try {
-      const answer = await callAiAssistant({ question: trimmed, language, topic: 'general' })
+      const history = messages
+        .filter((message) => message.id !== 'welcome')
+        .map((message) => ({ role: message.role, content: message.text }))
+      const answer = await callAiAssistant({ question: trimmed, language, topic: 'general programming', history })
       setMessages((current) => [...current, { id: `${Date.now()}-ai`, role: 'assistant', text: answer }])
     } catch (err) {
       const text = err instanceof Error ? err.message : t.generic.error
@@ -4570,6 +5018,141 @@ function LessonMaterials({ t, lesson }: { t: (typeof translations)[Lang]; lesson
       )}
     </div>
   )
+}
+
+/** "My subscription" card on the dashboard — all values come from the backend. */
+function SubscriptionPanel() {
+  const language = useLanguage()
+  const { plans, subscription, userEmail, refreshSubscription } = useBilling()
+  const [history, setHistory] = useState<SubscriptionHistory | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [confirmCancel, setConfirmCancel] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const current = accessPlanOf(subscription)
+  const plan = plans.find((item) => item.id === current) ?? bundledPlans[0]
+  const raw = subscription.rawStatus ?? 'free'
+
+  const loadHistory = useCallback(async () => {
+    if (!userEmail) return
+    try {
+      setHistory(await getSubscriptionHistory(userEmail))
+      setHistoryError(null)
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : String(error))
+    }
+  }, [userEmail])
+
+  useEffect(() => { void loadHistory() }, [loadHistory, subscription.endsAt, subscription.rawStatus])
+
+  const cancel = async () => {
+    if (!userEmail) return
+    setBusy(true)
+    try {
+      await cancelServerSubscription(userEmail)
+      await refreshSubscription()
+      setNotice(pick(language, 'Жазылуу жокко чыгарылды. Мөөнөтү бүткөнчө колдоно бересиз.', 'Подписка отменена. Доступ сохранится до конца оплаченного срока.', 'Subscription cancelled. Access stays until the end of the paid period.'))
+      setConfirmCancel(false)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const statusTone = raw === 'active' ? 'green' : raw === 'cancelled' ? 'gold' : raw === 'expired' ? 'danger' : 'neutral'
+
+  return (
+    <section className="detail-card subscription-panel" id="subscription" aria-label={pick(language, 'Менин жазылуум', 'Моя подписка', 'My subscription')}>
+      <div className="card-header-row">
+        <h3><Crown size={20} /> {pick(language, 'Менин жазылуум', 'Моя подписка', 'My subscription')}</h3>
+        <Badge tone={statusTone}>{subscriptionStatusText(subscription, language)}</Badge>
+      </div>
+
+      <div className="subscription-panel-grid">
+        <div className="subscription-panel-plan">
+          <span className="plan-tag">{PLAN_META[current].name}</span>
+          <strong>{plan.label[language]}</strong>
+          {current !== 'free' && <span className="subscription-days"><b>{subscription.remainingDays ?? 0}</b> {pick(language, 'күн калды', 'дн. осталось', 'days left')}</span>}
+        </div>
+        <dl className="subscription-panel-dates">
+          <div><dt>{pick(language, 'Сатып алынган күнү', 'Дата покупки', 'Purchased')}</dt><dd>{formatDateTime(subscription.purchasedAt, language, true)}</dd></div>
+          <div><dt>{pick(language, 'Башталышы', 'Начало', 'Started')}</dt><dd>{current === 'free' ? '—' : formatDateTime(subscription.startedAt, language)}</dd></div>
+          <div><dt>{pick(language, 'Бүтүшү', 'Действует до', 'Ends')}</dt><dd>{current === 'free' ? '—' : formatDateTime(subscription.endsAt, language)}</dd></div>
+          {subscription.grantedByAdmin && <div><dt>{pick(language, 'Булак', 'Источник', 'Source')}</dt><dd>{pick(language, 'Администратор берген', 'Выдано администратором', 'Granted by administrator')}</dd></div>}
+        </dl>
+      </div>
+
+      {subscription.pendingOrder && (
+        <div className="checkout-pending-note" role="status">
+          <Clock3 size={18} />
+          <span>{pick(language, 'Бүтпөгөн төлөм бар', 'Есть незавершённая оплата', 'There is an unfinished payment')}: {PLAN_META[subscription.pendingOrder.planId]?.name} · {subscription.pendingOrder.amount} сом</span>
+          <Link className="text-link" to={`/pricing/checkout/${subscription.pendingOrder.planId}?orderId=${encodeURIComponent(subscription.pendingOrder.orderId)}`}>{pick(language, 'Статусту көрүү', 'Посмотреть статус', 'View status')}</Link>
+        </div>
+      )}
+
+      <div className="subscription-panel-features">
+        <span>{pick(language, 'Сизге жеткиликтүү', 'Вам доступно', 'Available to you')}:</span>
+        <ul>{plan.features[language].map((feature) => <li key={feature}><CheckCircle2 size={15} /> {feature}</li>)}</ul>
+      </div>
+
+      <div className="subscription-panel-actions">
+        {current === 'free' && <ButtonLink to="/pricing" icon={Rocket}>{pick(language, 'Тариф тандоо', 'Выбрать тариф', 'Choose a plan')}</ButtonLink>}
+        {current !== 'free' && <ButtonLink to={`/pricing/checkout/${current}`} icon={RefreshCw}>{pick(language, 'Узартуу', 'Продлить подписку', 'Renew')}</ButtonLink>}
+        {current === 'pro' && <ButtonLink to="/pricing/checkout/aipro" variant="secondary" icon={Bot}>{pick(language, 'AI PRO тарифине өтүү', 'Перейти на AI PRO', 'Upgrade to AI PRO')}</ButtonLink>}
+        {raw === 'active' && current !== 'free' && <Button variant="ghost" size="sm" onClick={() => setConfirmCancel(true)}>{pick(language, 'Жазылууну жокко чыгаруу', 'Отменить подписку', 'Cancel subscription')}</Button>}
+      </div>
+      {notice && <p className="field-note" role="status">{notice}</p>}
+
+      <details className="subscription-history">
+        <summary>{pick(language, 'Жазылуу жана төлөм тарыхы', 'История подписки и платежей', 'Subscription & payment history')}</summary>
+        {historyError && <p className="error-message">{historyError}</p>}
+        {history && history.history.length === 0 && history.orders.length === 0 && <p className="field-note">{pick(language, 'Азырынча эч нерсе жок.', 'Пока ничего нет.', 'Nothing yet.')}</p>}
+        {history && history.history.length > 0 && (
+          <ul className="history-list">
+            {history.history.map((item) => (
+              <li key={item.id}>
+                <span>{historyEventText(item.event, language)} · <b>{PLAN_META[item.planId]?.name ?? item.planId}</b>{item.amount ? ` · ${item.amount} сом` : ''}</span>
+                <small>{formatDateTime(item.createdAt, language, true)}{item.endsAt ? ` → ${formatDateTime(item.endsAt, language)}` : ''}</small>
+              </li>
+            ))}
+          </ul>
+        )}
+        {history && history.orders.length > 0 && (
+          <>
+            <h4>{pick(language, 'Төлөмдөр', 'Платежи', 'Payments')}</h4>
+            <ul className="history-list">
+              {history.orders.map((order) => (
+                <li key={order.orderId}>
+                  <span><b>{PLAN_META[order.planId]?.name ?? order.planId}</b> · {order.amount} сом · {order.paymentMethod} · {paymentStatusText(order.status, language)}</span>
+                  <small>{formatDateTime(order.createdAt, language, true)}{order.transactionId ? ` · ID ${order.transactionId}` : ''}</small>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </details>
+
+      <Modal
+        open={confirmCancel}
+        onClose={() => setConfirmCancel(false)}
+        icon={X}
+        title={pick(language, 'Жазылууну жокко чыгаруу керекпи?', 'Отменить подписку?', 'Cancel the subscription?')}
+        actions={(
+          <>
+            <Button variant="secondary" size="sm" onClick={() => setConfirmCancel(false)}>{pick(language, 'Жок', 'Нет', 'No')}</Button>
+            <Button variant="danger" size="sm" disabled={busy} onClick={() => { void cancel() }}>{busy ? loadingLabel(language) : pick(language, 'Ооба, жокко чыгаруу', 'Да, отменить', 'Yes, cancel')}</Button>
+          </>
+        )}
+      >
+        <p>{pick(language, `Тариф ${formatDateTime(subscription.endsAt, language)} чейин иштей берет, андан кийин акысыз тарифке өтөсүз. Акча автоматтык түрдө кайтарылбайт.`, `Тариф продолжит работать до ${formatDateTime(subscription.endsAt, language)}, затем вы перейдёте на бесплатный. Деньги автоматически не возвращаются.`, `Your plan keeps working until ${formatDateTime(subscription.endsAt, language)}, then you move to the free plan. No automatic refund is made.`)}</p>
+      </Modal>
+    </section>
+  )
+}
+
+function loadingLabel(language: Lang) {
+  return translations[language].generic.loading
 }
 
 function SectionHeading({ title, eyebrow, subtitle }: { title: string; eyebrow?: string; subtitle?: string }) {

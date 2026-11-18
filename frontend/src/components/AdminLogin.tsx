@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertCircle, CheckCircle, Eye, EyeOff, Lock, ShieldCheck } from 'lucide-react'
-import { API_BASE_URL } from '../api'
+import { API_BASE_URL, fetchWithWakeRetry, isNetworkError } from '../api'
 
 type AdminLoginProps = {
   isLoggedIn: boolean
@@ -70,7 +70,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
 
     setSubmitting(true)
     try {
-      const response = await fetch(`${API_BASE}/api/auth/login`, {
+      const response = await fetchWithWakeRetry(`${API_BASE}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim().toLowerCase(), password })
@@ -125,8 +125,8 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
       const next = safeNextPath(searchParams.get('next'))
       navigate(next, { replace: true })
     } catch (err) {
-      const message = err instanceof Error && err.message === 'Failed to fetch'
-        ? 'Cannot connect to backend server. Make sure the backend is running on port 8787.'
+      const message = isNetworkError(err)
+        ? 'The server is not responding right now (it may be starting up or updating). Please wait a minute and try again.'
         : (err instanceof Error ? err.message : 'Login failed')
       setNotice({ kind: 'error', message })
     } finally {

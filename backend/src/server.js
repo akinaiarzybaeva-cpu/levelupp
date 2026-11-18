@@ -5,7 +5,9 @@ import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { config } from './config/config.js'
 import { db } from './config/db.js'
-import { getPlan } from './config/plans.js'
+import { activateSubscription, cancelSubscription, expireDueSubscriptions, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
+import { initTelegram, notifyPurchase, sendTelegramMessage, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
+import { AiError, aiConfig, askAssistant } from './ai.js'
 import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './config/provider.js'
 import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail } from './config/email.js'
 
@@ -33,8 +35,14 @@ const allowedOrigins = new Set([
   'https://levelupp-cyan.vercel.app',
   'https://levellupp.netlify.app',
   'https://localhost:5173',
-  'https://127.0.0.1:5173'
+  'https://127.0.0.1:5173',
+  // Extra production/custom domains, comma separated (e.g. https://levelup.kg,https://www.levelup.kg)
+  ...String(process.env.CORS_ALLOWED_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean)
 ])
+
+// Vercel preview / branch deployments of this project: https://levelupp-<hash>-<team>.vercel.app
+// (auth uses a bearer token, not cookies, so allowing these origins exposes no session).
+const VERCEL_PREVIEW_ORIGIN = /^https:\/\/levelupp(?:-[a-z0-9-]+)?\.vercel\.app$/
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -44,7 +52,7 @@ app.use(cors({
     }
 
     const normalizedOrigin = origin.replace(/\/+$/, '')
-    if (allowedOrigins.has(normalizedOrigin)) {
+    if (allowedOrigins.has(normalizedOrigin) || VERCEL_PREVIEW_ORIGIN.test(normalizedOrigin)) {
       callback(null, true)
       return
     }
@@ -106,6 +114,9 @@ const adminApiLimiter = rateLimit({
 })
 
 // ─── Database Prepared Statements ──────────────────────────────────────────────
+
+initBilling(db)
+initTelegram(db)
 
 const insertOrderStmt = db.prepare(`
   INSERT INTO payment_orders (
@@ -622,8 +633,15 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
 })
 
-app.get('/api/courses', (_req, res) => {
+app.get('/api/courses', (req, res) => {
   try {
+    // Lesson materials are only sent for lessons the requester may open:
+    // guests → first lesson, registered FREE → first 3, PRO / AI PRO / admin → all.
+    const viewerEmail = resolveAuthenticatedUserEmail(req)
+    const viewerProfile = viewerEmail ? getUserProfileStmt.get(viewerEmail) : null
+    const viewerIsAdmin = Boolean(viewerProfile && viewerEmail === config.adminEmail && normalizeRoleName(viewerProfile.role) === 'Admin')
+    const viewerPlan = viewerEmail ? getAccessPlan(db, viewerEmail) : 'free'
+    const lessonLimit = lessonLimitFor(viewerPlan, Boolean(viewerEmail), viewerIsAdmin)
     const courses = db.prepare('SELECT * FROM courses WHERE is_published = 1 ORDER BY order_index ASC').all()
     const lessons = db.prepare('SELECT * FROM lessons WHERE is_published = 1 ORDER BY course_id ASC, order_index ASC').all()
 
@@ -634,6 +652,24 @@ app.get('/api/courses', (_req, res) => {
       }
       let quiz = {}
       try { quiz = JSON.parse(lesson.quiz_json || '{}') } catch {}
+      const locked = lessonsByCourse[lesson.course_id].length >= lessonLimit
+      if (locked) {
+        lessonsByCourse[lesson.course_id].push({
+          id: lesson.id,
+          courseId: lesson.course_id,
+          title: { kg: lesson.title_kg, ru: lesson.title_ru, en: lesson.title_en },
+          duration: lesson.duration,
+          type: lesson.type,
+          theory: '',
+          code: '',
+          task: '',
+          videoUrl: '',
+          quiz: {},
+          orderIndex: lesson.order_index,
+          locked: true
+        })
+        continue
+      }
       lessonsByCourse[lesson.course_id].push({
         id: lesson.id,
         courseId: lesson.course_id,
@@ -676,7 +712,7 @@ app.get('/api/courses', (_req, res) => {
       }
     })
 
-    res.json({ courses: result })
+    res.json({ courses: result, access: { plan: viewerPlan, lessonLimit: Number.isFinite(lessonLimit) ? lessonLimit : null } })
   } catch (err) {
     sendServerError(res, err, 'Failed to fetch courses')
   }
@@ -685,23 +721,11 @@ app.get('/api/courses', (_req, res) => {
 // ─── Authentication Endpoints ─────────────────────────────────────────────────
 
 async function notifyTelegramAboutRegistration({ name, email }) {
-  const { botToken, chatId } = config.telegram
-  if (!botToken || !chatId) return
-
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: `New LevelUp registration\nName: ${name}\nEmail: ${email}` }),
-      signal: AbortSignal.timeout(5000)
-    })
-    if (!response.ok) {
-      // eslint-disable-next-line no-console
-      console.warn(`[TELEGRAM] sendMessage failed with HTTP ${response.status}`)
-    }
-  } catch (err) {
+  const safe = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const result = await sendTelegramMessage(`🆕 <b>New LevelUp registration</b>\nName: ${safe(name)}\nEmail: ${safe(email)}`)
+  if (!result.ok && !/not configured/i.test(result.error ?? '')) {
     // eslint-disable-next-line no-console
-    console.warn('[TELEGRAM] notification failed:', err instanceof Error ? err.message : err)
+    console.warn('[TELEGRAM] registration notification failed:', result.error)
   }
 }
 
@@ -1633,7 +1657,9 @@ app.get('/api/admin/ai-pro', adminApiLimiter, requireAdminAuth, (_req, res) => {
       }
     })
 
+    const ai = aiConfig()
     res.json({
+      provider: { configured: ai.configured, model: ai.model },
       systemEnabled,
       activeAiProUsers: Number(activeCountRow?.count ?? 0),
       totalAiProGrants: Number(totalAiProRow?.count ?? 0),
@@ -1675,30 +1701,16 @@ app.post('/api/admin/ai-pro/user', adminApiLimiter, requireAdminAuth, (req, res)
     const nowIso = new Date().toISOString()
 
     if (action === 'activate') {
-      // "+30 days" on an already active AI Pro grant extends it from its current end date.
-      const current = findSubscriptionStmt.get(userEmail)
-      const currentEndMs = current && current.plan_id === 'aipro' && current.status === 'active' ? new Date(current.ends_at).getTime() : NaN
-      const baseMs = Number.isFinite(currentEndMs) && currentEndMs > Date.now() ? currentEndMs : Date.now()
-      const endsAt = new Date(baseMs + Math.min(days, 3650) * 24 * 60 * 60 * 1000).toISOString()
-      upsertSubscriptionStmt.run({
-        user_email: userEmail,
-        plan_id: 'aipro',
-        status: 'active',
-        started_at: nowIso,
-        ends_at: endsAt,
-        purchased_at: nowIso,
-        updated_at: nowIso,
-        payment_method: 'admin_grant',
-        amount: 799,
-        currency: 'KGS',
-        order_id: `admin-ai-grant-${crypto.randomUUID()}`
-      })
-      res.json({ ok: true, action: 'activated', userEmail, endsAt })
+      // Same plan while active → the days are added to the current end date (see billing.js).
+      const grantId = `admin-ai-grant-${crypto.randomUUID()}`
+      const activation = activateSubscription(db, { userEmail, planId: 'aipro', days: Math.min(days, 3650), amount: 0, currency: 'KGS', paymentMethod: 'admin_grant', orderId: grantId, transactionId: grantId, source: 'admin' })
+      void notifySubscriptionActivated({ userEmail, planId: 'aipro', kind: 'admin', subscription: activation.subscription, transactionId: grantId, paymentStatus: 'GRANTED BY ADMIN (no payment)', paymentMethod: 'Administrator', amount: 0, currency: 'KGS', dedupeKey: grantId })
+      res.json({ ok: true, action: 'activated', userEmail, endsAt: activation.subscription.ends_at })
       return
     }
 
     if (action === 'deactivate') {
-      expireSubscriptionStmt.run({ user_email: userEmail, updated_at: nowIso })
+      revokeSubscription(db, userEmail)
       res.json({ ok: true, action: 'deactivated', userEmail })
       return
     }
@@ -1722,7 +1734,7 @@ app.post('/api/ai/chat', async (req, res) => {
     // Check system availability
     const setting = db.prepare("SELECT value FROM system_settings WHERE key = 'ai_pro_enabled'").get()
     if (setting && setting.value === 'false') {
-      res.status(503).json({ error: 'AI Pro service is currently disabled by administrator.' })
+      res.status(503).json({ error: 'AI Pro service is currently disabled by administrator.', code: 'AI_DISABLED' })
       return
     }
 
@@ -1734,10 +1746,9 @@ app.post('/api/ai/chat', async (req, res) => {
 
     // Check authorization: Must be the administrator OR have an active AI Pro subscription
     const isAdmin = userEmail === config.adminEmail && normalizeRoleName(profile.role) === 'Admin'
-    const nowIso = new Date().toISOString()
-    const activeSub = db.prepare("SELECT * FROM user_subscriptions WHERE user_email = ? AND plan_id = 'aipro' AND status = 'active' AND datetime(ends_at) > datetime(?)").get(userEmail, nowIso)
+    const hasAiPro = getAccessPlan(db, userEmail) === 'aipro'
 
-    if (!isAdmin && !activeSub) {
+    if (!isAdmin && !hasAiPro) {
       res.status(403).json({ error: 'AI Pro subscription is required to use this feature.' })
       return
     }
@@ -1751,36 +1762,26 @@ app.post('/api/ai/chat', async (req, res) => {
       return
     }
 
-    // Provide intelligent educational assistant reply
-    let answer = ''
-    if (language === 'kg') {
-      answer = `[AI Pro Жардамчы]: "${topic}" темасы боюнча сурооңузга жооп:\n\n`
-        + `Сиздин сурооңуз: "${question}"\n\n`
-        + `Негизги түшүндүрмө:\n`
-        + `1. Бул багытта эң маанилүү нерсе — базалык концепцияларды терең түшүнүү жана практика жүзүндө колдонуу.\n`
-        + `2. Кодду жазууда тазалыкты жана семантиканы сактаңыз.\n`
-        + `3. Каталарды талдоодо браузердин же терминалдын дебаггер куралдарын колдонуу сунушталат.\n\n`
-        + `Сурооңуз боюнча кошумча суроолор болсо, тартынбай бериңиз!`
-    } else if (language === 'en') {
-      answer = `[AI Pro Assistant]: Response regarding "${topic}":\n\n`
-        + `Regarding your question: "${question}"\n\n`
-        + `Key insights and recommendations:\n`
-        + `1. Core Architecture: Focus on building a clear mental model of how components and data flow together.\n`
-        + `2. Best Practices: Keep your code modular, self-documenting, and properly typed.\n`
-        + `3. Debugging: Use console breakpoints, network inspectors, and unit tests to verify behavior.\n\n`
-        + `Feel free to ask follow-up questions or share specific code snippets for code review!`
-    } else {
-      answer = `[AI Pro Ассистент]: Ответ по теме "${topic}":\n\n`
-        + `Ваш вопрос: "${question}"\n\n`
-        + `Разбор и рекомендации:\n`
-        + `1. Основная концепция: В теме "${topic}" ключевую роль играет понимание базовых механизмов и правильная архитектурная структура.\n`
-        + `2. Практические шаги: При написании кода соблюдайте стандарты форматирования, разбивайте задачи на небольшие чистые функции и обрабатывайте граничные случаи.\n`
-        + `3. Отладка: Рекомендуется проверять результаты в DevTools и логировать промежуточные значения.\n\n`
-        + `Если хотите разобрать конкретный фрагмент кода или решить практическое упражнение — отправьте его сюда!`
+    const rawHistory = Array.isArray(req.body?.history) ? req.body.history.slice(-10) : []
+    const history = []
+    for (const item of rawHistory) {
+      const role = item?.role === 'assistant' ? 'assistant' : item?.role === 'user' ? 'user' : null
+      const content = clampText(item?.content, 4000)
+      if (!role || !content) continue
+      if (history.length === 0 && role !== 'user') continue
+      if (history.length && history[history.length - 1].role === role) continue
+      history.push({ role, content })
     }
+    if (history.length && history[history.length - 1].role === 'user') history.pop()
 
-    res.json({ ok: true, answer })
+    const lang = ['kg', 'ru', 'en'].includes(language) ? language : 'ru'
+    const result = await askAssistant({ question, topic, language: lang, history })
+    res.json({ ok: true, answer: result.answer, model: result.model, truncated: result.truncated })
   } catch (err) {
+    if (err instanceof AiError) {
+      res.status(err.status).json({ error: err.message, code: err.code })
+      return
+    }
     sendServerError(res, err, 'AI service error')
   }
 })
@@ -1862,8 +1863,10 @@ app.delete('/api/admin/reviews/:reviewId', adminApiLimiter, requireAdminAuth, (r
 // ─── ADMIN: Subscriptions ─────────────────────────────────────────────────────
 
 app.get('/api/admin/subscriptions', adminApiLimiter, requireAdminAuth, (req, res) => {
+  expireDueSubscriptions(db)
   const search = String(req.query.search ?? '').trim().toLowerCase()
   const planFilter = String(req.query.plan ?? '').trim()
+  const statusFilter = String(req.query.status ?? '').trim()
 
   let sql = `
     SELECT s.*, p.first_name, p.last_name
@@ -1883,6 +1886,11 @@ app.get('/api/admin/subscriptions', adminApiLimiter, requireAdminAuth, (req, res
     params.push(planFilter)
   }
 
+  if (statusFilter && statusFilter !== 'all') {
+    clauses.push('s.status = ?')
+    params.push(statusFilter)
+  }
+
   if (clauses.length) sql += ' WHERE ' + clauses.join(' AND ')
   sql += ' ORDER BY datetime(s.updated_at) DESC'
 
@@ -1899,9 +1907,15 @@ app.get('/api/admin/subscriptions', adminApiLimiter, requireAdminAuth, (req, res
       paymentMethod: row.payment_method,
       amount: row.amount,
       currency: row.currency,
-      orderId: row.order_id
+      orderId: row.order_id,
+      cancelledAt: row.cancelled_at ?? null
     }))
   })
+})
+
+app.get('/api/admin/subscriptions/:userEmail/history', adminApiLimiter, requireAdminAuth, (req, res) => {
+  const userEmail = String(req.params.userEmail ?? '').trim().toLowerCase()
+  res.json({ history: listHistory(db, userEmail, 100) })
 })
 
 app.patch('/api/admin/subscriptions/:userEmail', adminApiLimiter, requireAdminAuth, (req, res) => {
@@ -1916,35 +1930,22 @@ app.patch('/api/admin/subscriptions/:userEmail', adminApiLimiter, requireAdminAu
   const nowIso = new Date().toISOString()
 
   if (action === 'revoke') {
-    expireSubscriptionStmt.run({ user_email: userEmail, updated_at: nowIso })
+    revokeSubscription(db, userEmail)
     res.json({ ok: true, action: 'revoked' })
     return
   }
 
   if (action === 'activate') {
-    const planId = String(req.body?.planId ?? 'pro').trim()
-    const plan = getPlan(planId)
-    if (!plan) {
+    const plan = getPlanById(db, req.body?.planId ?? 'pro')
+    if (!plan || plan.id === 'free') {
       res.status(400).json({ error: 'Invalid plan ID' })
       return
     }
-
-    const endDate = new Date(Date.now() + plan.durationDays * 24 * 60 * 60 * 1000)
-    upsertSubscriptionStmt.run({
-      user_email: userEmail,
-      plan_id: plan.id,
-      status: 'active',
-      started_at: nowIso,
-      ends_at: endDate.toISOString(),
-      purchased_at: nowIso,
-      updated_at: nowIso,
-      payment_method: 'admin',
-      amount: plan.amount,
-      currency: 'KGS',
-      order_id: `admin-grant-${crypto.randomUUID()}`
-    })
-
-    res.json({ ok: true, action: 'activated', planId: plan.id })
+    void nowIso
+    const grantId = `admin-grant-${crypto.randomUUID()}`
+    const activation = activateSubscription(db, { userEmail, planId: plan.id, days: plan.durationDays, amount: 0, currency: plan.currency, paymentMethod: 'admin', orderId: grantId, transactionId: grantId, source: 'admin' })
+    void notifySubscriptionActivated({ userEmail, planId: plan.id, kind: 'admin', subscription: activation.subscription, transactionId: grantId, paymentStatus: 'GRANTED BY ADMIN (no payment)', paymentMethod: 'Administrator', amount: 0, currency: plan.currency, dedupeKey: grantId })
+    res.json({ ok: true, action: 'activated', planId: plan.id, kind: activation.kind })
     return
   }
 
@@ -1985,10 +1986,81 @@ app.get('/api/admin/payments', adminApiLimiter, requireAdminAuth, (req, res) => 
       currency: row.currency,
       status: row.status,
       isActivated: Boolean(row.is_activated),
+      providerOrderId: row.provider_order_id,
+      transactionId: row.provider_payment_id,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     }))
   })
+})
+
+app.get('/api/admin/payments/:orderId', adminApiLimiter, requireAdminAuth, (req, res) => {
+  const order = findOrderByIdStmt.get(String(req.params.orderId ?? ''))
+  if (!order) {
+    res.status(404).json({ error: 'Order not found' })
+    return
+  }
+  const transactions = db.prepare('SELECT * FROM payments WHERE order_id = ? ORDER BY datetime(created_at) ASC').all(order.id)
+  let lastProviderPayload = null
+  try { lastProviderPayload = order.provider_payload ? JSON.parse(order.provider_payload) : null } catch { lastProviderPayload = String(order.provider_payload).slice(0, 2000) }
+  res.json({
+    order: {
+      id: order.id,
+      userEmail: order.user_email,
+      planId: order.plan_id,
+      paymentMethod: order.payment_method,
+      amount: order.amount,
+      currency: order.currency,
+      provider: order.provider,
+      providerOrderId: order.provider_order_id,
+      providerPaymentId: order.provider_payment_id,
+      status: order.status,
+      isActivated: Boolean(order.is_activated),
+      createdAt: order.created_at,
+      updatedAt: order.updated_at,
+      lastProviderPayload
+    },
+    transactions: transactions.map((t) => ({ id: t.id, provider: t.provider, transactionId: t.provider_transaction_id, amount: t.amount, currency: t.currency, status: t.status, createdAt: t.created_at }))
+  })
+})
+
+// ─── ADMIN: Plans (prices, texts, availability) ───────────────────────────────
+
+app.get('/api/admin/plans', adminApiLimiter, requireAdminAuth, (_req, res) => {
+  res.json({ plans: listPlans(db, { includeDisabled: true }) })
+})
+
+app.put('/api/admin/plans/:planId', adminApiLimiter, requireAdminAuth, (req, res) => {
+  const result = updatePlan(db, req.params.planId, req.body ?? {})
+  if (result.error) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json({ ok: true, plan: result.plan })
+})
+
+// ─── ADMIN: Telegram notifications ────────────────────────────────────────────
+
+app.get('/api/admin/telegram', adminApiLimiter, requireAdminAuth, (_req, res) => {
+  res.json(telegramStatus(db))
+})
+
+app.patch('/api/admin/telegram', adminApiLimiter, requireAdminAuth, (req, res) => {
+  if (typeof req.body?.enabled !== 'boolean') {
+    res.status(400).json({ error: '"enabled" must be true or false' })
+    return
+  }
+  setPurchaseNotificationsEnabled(db, req.body.enabled)
+  res.json(telegramStatus(db))
+})
+
+app.post('/api/admin/telegram/test', adminApiLimiter, requireAdminAuth, async (_req, res) => {
+  const result = await sendTestNotification(db)
+  if (!result.ok) {
+    res.status(502).json({ ok: false, error: result.error, status: telegramStatus(db) })
+    return
+  }
+  res.json({ ok: true, status: telegramStatus(db) })
 })
 
 // ─── ADMIN: Settings — Change Admin Password ──────────────────────────────────
@@ -2177,17 +2249,48 @@ app.post('/api/payments/orders', async (req, res) => {
     return
   }
 
-  const userName = typeof req.body?.userName === 'string' ? req.body.userName.trim() : ''
-  const paymentMethod = typeof req.body?.paymentMethod === 'string' ? req.body.paymentMethod : ''
-  const plan = getPlan(req.body?.planId)
+  const profile = getUserProfileStmt.get(userEmail)
+  if (!profile || isProfileBlocked(profile)) {
+    res.status(403).json({ error: 'Account is not allowed to make purchases.' })
+    return
+  }
 
-  if (!plan) {
-    res.status(400).json({ error: 'Unsupported subscription plan' })
+  const userName = typeof req.body?.userName === 'string' ? clampText(req.body.userName, 120) : ''
+  const paymentMethod = typeof req.body?.paymentMethod === 'string' ? req.body.paymentMethod : ''
+  const plan = getPlanById(db, req.body?.planId)
+
+  if (!plan || plan.id === 'free') {
+    res.status(400).json({ error: 'Unsupported subscription plan', code: 'PLAN_UNSUPPORTED' })
+    return
+  }
+
+  if (!plan.isEnabled) {
+    res.status(400).json({ error: 'This plan is not available right now', code: 'PLAN_DISABLED' })
     return
   }
 
   if (paymentMethod !== 'MBank' && paymentMethod !== 'Элсом' && paymentMethod !== 'O!Деньги') {
-    res.status(400).json({ error: 'Unsupported payment method' })
+    res.status(400).json({ error: 'Unsupported payment method', code: 'METHOD_UNSUPPORTED' })
+    return
+  }
+
+  // A lower plan is never sold on top of an active higher one (AI PRO already includes PRO).
+  const accessPlan = getAccessPlan(db, userEmail)
+  if (PLAN_RANK[plan.id] < PLAN_RANK[accessPlan]) {
+    res.status(409).json({ error: 'Your current plan already includes this plan', code: 'PLAN_INCLUDED' })
+    return
+  }
+
+  // Duplicate protection: a fresh unpaid order for the same plan, price and method is reused
+  // instead of creating a second charge.
+  const recentPending = db.prepare(`
+    SELECT * FROM payment_orders
+    WHERE user_email = ? AND plan_id = ? AND payment_method = ? AND amount = ? AND status = 'pending'
+      AND payment_url IS NOT NULL AND datetime(created_at) > datetime(?)
+    ORDER BY datetime(created_at) DESC LIMIT 1
+  `).get(userEmail, plan.id, paymentMethod, plan.price, new Date(Date.now() - 30 * 60 * 1000).toISOString())
+  if (recentPending) {
+    res.json({ orderId: recentPending.id, providerOrderId: recentPending.provider_order_id, paymentUrl: recentPending.payment_url, status: recentPending.status, amount: recentPending.amount, currency: recentPending.currency, reused: true })
     return
   }
 
@@ -2197,7 +2300,7 @@ app.post('/api/payments/orders', async (req, res) => {
   try {
     const providerOrder = await createProviderOrder({
       internalOrderId,
-      plan,
+      plan: { id: plan.id, amount: plan.price, currency: plan.currency, durationDays: plan.durationDays },
       paymentMethod,
       userEmail,
       userName
@@ -2208,7 +2311,7 @@ app.post('/api/payments/orders', async (req, res) => {
       user_email: userEmail,
       plan_id: plan.id,
       payment_method: paymentMethod,
-      amount: plan.amount,
+      amount: plan.price,
       currency: plan.currency,
       provider: config.payment.provider,
       provider_order_id: providerOrder.providerOrderId,
@@ -2222,12 +2325,18 @@ app.post('/api/payments/orders', async (req, res) => {
       orderId: internalOrderId,
       providerOrderId: providerOrder.providerOrderId,
       paymentUrl: providerOrder.paymentUrl,
-      status: providerOrder.status
+      status: providerOrder.status,
+      amount: plan.price,
+      currency: plan.currency
     })
   } catch (error) {
+    if (error && error.code === 'PAYMENT_NOT_CONFIGURED') {
+      res.status(503).json({ error: 'Online payment is not connected yet. Please try again later.', code: 'PAYMENT_NOT_CONFIGURED' })
+      return
+    }
     // eslint-disable-next-line no-console
-    console.error('[PAYMENTS] order creation failed:', error)
-    res.status(502).json({ error: 'Payment provider is unavailable. Please try again later.' })
+    console.error('[PAYMENTS] order creation failed:', error instanceof Error ? error.message : error)
+    res.status(502).json({ error: 'Payment provider is unavailable. Please try again later.', code: 'PROVIDER_ERROR' })
   }
 })
 
@@ -2262,40 +2371,90 @@ app.get('/api/payments/orders/:orderId', (req, res) => {
     paymentUrl: order.payment_url,
     activated: Boolean(order.is_activated),
     createdAt: order.created_at,
-    updatedAt: order.updated_at
+    updatedAt: order.updated_at,
+    provider: order.provider,
+    paymentReference: order.payment_reference ?? null,
+    reviewNote: order.status === 'failed' ? (order.review_note ?? null) : null
   })
 })
 
-app.get('/api/subscription/:userEmail', (req, res) => {
+/** The signed-in user may only read or change their own subscription. */
+function resolveOwnEmail(req, res) {
   const userEmail = String(req.params.userEmail ?? '').trim().toLowerCase()
   const sessionEmail = resolveAuthenticatedUserEmail(req)
-
   if (!sessionEmail) {
     res.status(401).json({ error: 'Authentication required' })
-    return
+    return null
   }
   if (sessionEmail !== userEmail) {
     res.status(403).json({ error: 'Forbidden' })
-    return
+    return null
   }
+  return userEmail
+}
 
-  const row = findSubscriptionStmt.get(userEmail)
-  if (!row) {
-    res.json(buildFreeSubscription(userEmail))
-    return
-  }
-
-  const endsAtMs = new Date(row.ends_at).getTime()
-  if (row.plan_id !== 'free' && Number.isFinite(endsAtMs) && endsAtMs <= Date.now()) {
-    const nowIso = new Date().toISOString()
-    expireSubscriptionStmt.run({ user_email: userEmail, updated_at: nowIso })
-    const expiredRow = findSubscriptionStmt.get(userEmail)
-    res.json(formatSubscription(expiredRow, userEmail))
-    return
-  }
-
-  res.json(formatSubscription(row, userEmail))
+app.get('/api/plans', (_req, res) => {
+  res.json({ plans: listPlans(db) })
 })
+
+app.get('/api/subscription/:userEmail', (req, res) => {
+  const userEmail = resolveOwnEmail(req, res)
+  if (!userEmail) return
+  const account = db.prepare('SELECT rowid AS account_id FROM user_profiles WHERE user_email = ?').get(userEmail)
+  res.json({ ...formatSubscriptionForUser(db, userEmail), accountId: account ? `#${account.account_id}` : null })
+})
+
+app.get('/api/subscription/:userEmail/history', (req, res) => {
+  const userEmail = resolveOwnEmail(req, res)
+  if (!userEmail) return
+  const orders = db.prepare(`
+    SELECT o.*, (SELECT p.provider_transaction_id FROM payments p WHERE p.order_id = o.id LIMIT 1) AS transaction_id
+    FROM payment_orders o WHERE o.user_email = ? ORDER BY datetime(o.created_at) DESC LIMIT 50
+  `).all(userEmail)
+  res.json({
+    history: listHistory(db, userEmail),
+    orders: orders.map((o) => ({ orderId: o.id, planId: o.plan_id, amount: o.amount, currency: o.currency, paymentMethod: o.payment_method, status: o.status, activated: Boolean(o.is_activated), transactionId: o.transaction_id ?? null, createdAt: o.created_at, updatedAt: o.updated_at }))
+  })
+})
+
+app.post('/api/subscription/:userEmail/cancel', (req, res) => {
+  const userEmail = resolveOwnEmail(req, res)
+  if (!userEmail) return
+  const result = cancelSubscription(db, userEmail)
+  if (result.error) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json(formatSubscriptionForUser(db, userEmail))
+})
+
+/** Telegram message for an activation (payment or admin grant). Never throws. */
+function notifySubscriptionActivated({ userEmail, planId, kind, subscription, transactionId, paymentStatus, paymentMethod, amount, currency, dedupeKey, fullName }) {
+  try {
+    const profile = db.prepare('SELECT rowid AS account_id, first_name, last_name FROM user_profiles WHERE user_email = ?').get(userEmail)
+    const name = (fullName && String(fullName).trim()) || `${profile?.first_name ?? ''} ${profile?.last_name ?? ''}`.trim() || userEmail
+    return notifyPurchase(db, {
+      kind,
+      name,
+      email: userEmail,
+      username: userEmail.split('@')[0],
+      accountId: profile ? `#${profile.account_id}` : '—',
+      planId,
+      amount,
+      currency,
+      paymentMethod,
+      purchasedAt: subscription?.purchased_at,
+      endsAt: subscription?.ends_at,
+      subscriptionStatus: subscription?.status ?? 'active',
+      transactionId,
+      paymentStatus
+    }, dedupeKey)
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[TELEGRAM] could not prepare purchase notification:', error instanceof Error ? error.message : error)
+    return Promise.resolve({ failed: 'prepare' })
+  }
+}
 
 app.post('/api/payments/webhook/:provider', (req, res) => {
   const signature = req.headers['x-signature'] ?? req.headers['x-payment-signature'] ?? ''
@@ -2328,79 +2487,430 @@ app.post('/api/payments/webhook/:provider', (req, res) => {
     return
   }
 
-  const nowIso = new Date().toISOString()
-  updateOrderStatusStmt.run({
-    id: order.id,
-    status: normalized.status,
-    provider_payment_id: normalized.paymentRef || null,
-    provider_payload: JSON.stringify(req.body ?? {}),
-    updated_at: nowIso
-  })
+  // A paid order never goes back to pending / failed / cancelled because of a late or
+  // repeated callback, and it is activated at most once.
+  if (order.is_activated || order.status === 'paid') {
+    res.json({ ok: true, status: order.status, alreadyActivated: Boolean(order.is_activated), ignored: normalized.status !== 'paid' })
+    return
+  }
 
+  const nowIso = new Date().toISOString()
   if (normalized.status !== 'paid') {
+    updateOrderStatusStmt.run({
+      id: order.id,
+      status: normalized.status,
+      provider_payment_id: normalized.paymentRef || null,
+      provider_payload: JSON.stringify(req.body ?? {}),
+      updated_at: nowIso
+    })
+    if ((normalized.status === 'failed' || normalized.status === 'cancelled') && order.status !== normalized.status) {
+      recordHistory(db, { user_email: order.user_email, event: normalized.status === 'failed' ? 'payment_failed' : 'payment_cancelled', plan_id: order.plan_id, status: normalized.status, amount: order.amount, currency: order.currency, payment_method: order.payment_method, order_id: order.id, transaction_id: normalized.paymentRef || null })
+    }
     res.json({ ok: true, status: normalized.status })
     return
   }
 
-  if (order.is_activated) {
-    res.json({ ok: true, status: 'paid', alreadyActivated: true })
-    return
-  }
-
-  const plan = getPlan(order.plan_id)
-  if (!plan) {
+  const plan = getPlanById(db, order.plan_id)
+  if (!plan || plan.id === 'free') {
     res.status(400).json({ error: 'Unsupported plan in order' })
     return
   }
 
-  const activateTx = db.transaction(() => {
-    const startDate = new Date()
-    const endDate = new Date(startDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000)
-    const startedAt = startDate.toISOString()
-    const endsAt = endDate.toISOString()
-
-    upsertSubscriptionStmt.run({
-      user_email: order.user_email,
-      plan_id: plan.id,
-      status: 'active',
-      started_at: startedAt,
-      ends_at: endsAt,
-      purchased_at: startedAt,
-      updated_at: startedAt,
-      payment_method: order.payment_method,
-      amount: order.amount,
-      currency: order.currency,
-      order_id: order.id
-    })
-
-    insertPaymentStmt.run({
-      id: crypto.randomUUID(),
-      order_id: order.id,
-      provider: order.provider,
-      provider_transaction_id: normalized.paymentRef || `tx-${order.id}`,
-      amount: order.amount,
-      currency: order.currency,
-      status: 'completed',
-      raw_payload: JSON.stringify(req.body ?? {}),
-      created_at: startedAt
-    })
-
-    markOrderActivatedStmt.run({ id: order.id, updated_at: startedAt })
-  })
-
+  const transactionId = normalized.paymentRef || `tx-${order.id}`
+  let activation = null
   try {
-    activateTx()
-    res.json({ ok: true, status: 'paid', activated: true })
+    activation = db.transaction(() => {
+      // Atomic claim: only one callback can move this order to activated.
+      const claim = db.prepare("UPDATE payment_orders SET status = 'paid', is_activated = 1, provider_payment_id = ?, provider_payload = ?, updated_at = ? WHERE id = ? AND is_activated = 0")
+        .run(normalized.paymentRef || null, JSON.stringify(req.body ?? {}), nowIso, order.id)
+      if (claim.changes !== 1) return null
+      insertPaymentStmt.run({
+        id: crypto.randomUUID(),
+        order_id: order.id,
+        provider: order.provider,
+        provider_transaction_id: transactionId,
+        amount: order.amount,
+        currency: order.currency,
+        status: 'completed',
+        raw_payload: JSON.stringify(req.body ?? {}),
+        created_at: nowIso
+      })
+      return activateSubscription(db, { userEmail: order.user_email, planId: plan.id, days: plan.durationDays, amount: order.amount, currency: order.currency, paymentMethod: order.payment_method, orderId: order.id, transactionId, source: 'payment' })
+    })()
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to activate subscription'
+    const message = error instanceof Error ? error.message : ''
     if (message.includes('UNIQUE constraint failed: payments.provider_transaction_id')) {
-      markOrderActivatedStmt.run({ id: order.id, updated_at: nowIso })
-      res.json({ ok: true, status: 'paid', alreadyActivated: true })
+      // This provider transaction was already used for another order: never activate twice.
+      res.status(409).json({ error: 'Duplicate transaction' })
       return
     }
-
     sendServerError(res, error, 'Failed to activate subscription')
+    return
   }
+
+  if (!activation) {
+    res.json({ ok: true, status: 'paid', alreadyActivated: true })
+    return
+  }
+
+  void notifySubscriptionActivated({ userEmail: order.user_email, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID', paymentMethod: order.payment_method, amount: order.amount, currency: order.currency, dedupeKey: transactionId })
+  res.json({ ok: true, status: 'paid', activated: true, kind: activation.kind })
+})
+
+// ─── Manual bank transfer (purchase request reviewed by the administrator) ────
+// Only transfer details are collected: payer name, bank reference, optional receipt note.
+// Card numbers / CVV / expiry are never requested or stored.
+
+function manualTransferConfig() {
+  const account = String(process.env.MANUAL_TRANSFER_ACCOUNT ?? '').trim()
+  const enabled = String(process.env.MANUAL_TRANSFER_ENABLED ?? '').trim().toLowerCase() === 'true' && Boolean(account)
+  return {
+    enabled,
+    bankName: String(process.env.MANUAL_TRANSFER_BANK_NAME ?? '').trim(),
+    recipient: String(process.env.MANUAL_TRANSFER_RECIPIENT ?? '').trim(),
+    account,
+    instructions: String(process.env.MANUAL_TRANSFER_INSTRUCTIONS ?? '').trim()
+  }
+}
+
+const PAYMENT_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9\-_/.# ]{3,63}$/
+const CARD_NUMBER_PATTERN = /(?:\d[ -]?){13,19}/
+
+app.get('/api/payments/manual/config', (_req, res) => {
+  const cfg = manualTransferConfig()
+  if (!cfg.enabled) {
+    res.json({ enabled: false })
+    return
+  }
+  res.json(cfg)
+})
+
+const purchaseRequestLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many purchase requests. Try again later.', code: 'RATE_LIMITED' }
+})
+
+app.post('/api/payments/manual', purchaseRequestLimiter, (req, res) => {
+  const sessionEmail = resolveAuthenticatedUserEmail(req)
+  if (!sessionEmail) {
+    res.status(401).json({ error: 'Authentication required. Please log in.', code: 'AUTH_REQUIRED' })
+    return
+  }
+  const profile = getUserProfileStmt.get(sessionEmail)
+  if (!profile || isProfileBlocked(profile)) {
+    res.status(403).json({ error: 'Account is not allowed to make purchases.', code: 'ACCOUNT_BLOCKED' })
+    return
+  }
+
+  const cfg = manualTransferConfig()
+  if (!cfg.enabled) {
+    res.status(503).json({ error: 'Bank transfer is not available right now.', code: 'MANUAL_NOT_CONFIGURED' })
+    return
+  }
+
+  const fullName = clampText(req.body?.fullName, 120).trim()
+  const email = String(req.body?.email ?? '').trim().toLowerCase()
+  const payerName = clampText(req.body?.payerName, 120).trim()
+  const paymentReference = clampText(req.body?.paymentReference, 64).trim()
+  const receiptNote = clampText(req.body?.receiptNote ?? '', 300).trim()
+
+  const missing = []
+  if (fullName.length < 2) missing.push('fullName')
+  if (!email) missing.push('email')
+  if (payerName.length < 2) missing.push('payerName')
+  if (!paymentReference) missing.push('paymentReference')
+  if (missing.length) {
+    res.status(400).json({ error: 'Please fill in all required fields.', code: 'MISSING_FIELDS', fields: missing })
+    return
+  }
+  if (!EMAIL_PATTERN.test(email)) {
+    res.status(400).json({ error: 'Invalid email address.', code: 'INVALID_EMAIL', fields: ['email'] })
+    return
+  }
+  if (email !== sessionEmail) {
+    res.status(400).json({ error: 'Email must match the signed-in account.', code: 'EMAIL_MISMATCH', fields: ['email'] })
+    return
+  }
+  if (!PAYMENT_REFERENCE_PATTERN.test(paymentReference)) {
+    res.status(400).json({ error: 'Invalid payment reference.', code: 'INVALID_REFERENCE', fields: ['paymentReference'] })
+    return
+  }
+  // Refuse anything that looks like a card number: we must never store card data.
+  if (CARD_NUMBER_PATTERN.test(paymentReference) || CARD_NUMBER_PATTERN.test(receiptNote)) {
+    res.status(400).json({ error: 'Do not enter card numbers. Use the bank transaction reference.', code: 'CARD_DATA_REJECTED', fields: ['paymentReference'] })
+    return
+  }
+
+  const plan = getPlanById(db, req.body?.planId)
+  if (!plan || plan.id === 'free') {
+    res.status(400).json({ error: 'Unsupported subscription plan', code: 'PLAN_UNSUPPORTED' })
+    return
+  }
+  if (!plan.isEnabled) {
+    res.status(400).json({ error: 'This plan is not available right now', code: 'PLAN_DISABLED' })
+    return
+  }
+  if (PLAN_RANK[plan.id] < PLAN_RANK[getAccessPlan(db, sessionEmail)]) {
+    res.status(409).json({ error: 'Your current plan already includes this plan', code: 'PLAN_INCLUDED' })
+    return
+  }
+
+  const normalizedReference = paymentReference.toUpperCase().replace(/\s+/g, ' ')
+  const orderId = crypto.randomUUID()
+  const nowIso = new Date().toISOString()
+  try {
+    db.prepare(`
+      INSERT INTO payment_orders (id, user_email, plan_id, payment_method, amount, currency, provider, status, is_activated,
+        customer_name, customer_email, payer_name, payment_reference, receipt_note, created_at, updated_at)
+      VALUES (?, ?, ?, 'Bank transfer', ?, ?, 'manual', 'pending', 0, ?, ?, ?, ?, ?, ?, ?)
+    `).run(orderId, sessionEmail, plan.id, plan.price, plan.currency, fullName, email, payerName, normalizedReference, receiptNote || null, nowIso, nowIso)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    if (message.includes('payment_orders.payment_reference')) {
+      res.status(409).json({ error: 'This payment reference was already submitted.', code: 'DUPLICATE_REFERENCE', fields: ['paymentReference'] })
+      return
+    }
+    if (message.includes('payment_orders.user_email')) {
+      res.status(409).json({ error: 'You already have a transfer awaiting review.', code: 'MANUAL_PENDING_EXISTS' })
+      return
+    }
+    sendServerError(res, error, 'Failed to create purchase request')
+    return
+  }
+
+  recordHistory(db, { user_email: sessionEmail, event: 'manual_submitted', plan_id: plan.id, status: 'pending', amount: plan.price, currency: plan.currency, payment_method: 'Bank transfer', order_id: orderId, transaction_id: normalizedReference })
+  res.status(201).json({ orderId, status: 'pending', planId: plan.id, amount: plan.price, currency: plan.currency, paymentReference: normalizedReference })
+})
+
+function formatPurchaseRequest(row) {
+  return {
+    id: row.id,
+    userEmail: row.user_email,
+    fullName: row.customer_name || `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() || null,
+    accountId: row.account_id != null ? `#${row.account_id}` : null,
+    planId: row.plan_id,
+    amount: row.amount,
+    currency: row.currency,
+    paymentMethod: row.payment_method,
+    provider: row.provider,
+    status: row.status,
+    activated: Boolean(row.is_activated),
+    payerName: row.payer_name ?? null,
+    transactionId: row.payment_reference ?? row.provider_payment_id ?? null,
+    receiptNote: row.receipt_note ?? null,
+    reviewedAt: row.reviewed_at ?? null,
+    reviewedBy: row.reviewed_by ?? null,
+    reviewNote: row.review_note ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }
+}
+
+app.get('/api/admin/purchase-requests', adminApiLimiter, requireAdminAuth, (req, res) => {
+  const status = String(req.query.status ?? 'all').trim()
+  const params = []
+  let where = "WHERE o.provider = 'manual'"
+  if (['pending', 'paid', 'failed'].includes(status)) {
+    where += ' AND o.status = ?'
+    params.push(status)
+  }
+  const rows = db.prepare(`
+    SELECT o.*, u.rowid AS account_id, u.first_name, u.last_name
+    FROM payment_orders o LEFT JOIN user_profiles u ON u.user_email = o.user_email
+    ${where}
+    ORDER BY CASE o.status WHEN 'pending' THEN 0 ELSE 1 END, datetime(o.created_at) DESC
+    LIMIT 200
+  `).all(...params)
+  const pendingCount = db.prepare("SELECT COUNT(*) AS c FROM payment_orders WHERE provider = 'manual' AND status = 'pending'").get().c
+  res.json({ requests: rows.map(formatPurchaseRequest), pendingCount, manualTransfer: { enabled: manualTransferConfig().enabled } })
+})
+
+app.post('/api/admin/purchase-requests/:id/approve', adminApiLimiter, requireAdminAuth, (req, res) => {
+  const order = findOrderByIdStmt.get(String(req.params.id ?? ''))
+  if (!order || order.provider !== 'manual') {
+    res.status(404).json({ error: 'Purchase request not found' })
+    return
+  }
+  const plan = getPlanById(db, order.plan_id)
+  if (!plan || plan.id === 'free') {
+    res.status(400).json({ error: 'Unsupported plan in request' })
+    return
+  }
+  const note = clampText(req.body?.note ?? '', 300).trim() || null
+  const nowIso = new Date().toISOString()
+  const transactionId = order.payment_reference || `manual-${order.id}`
+
+  let activation = null
+  try {
+    activation = db.transaction(() => {
+      // Atomic claim: a request can be approved exactly once, and never after rejection.
+      const claim = db.prepare("UPDATE payment_orders SET status = 'paid', is_activated = 1, provider_payment_id = ?, reviewed_at = ?, reviewed_by = ?, review_note = ?, updated_at = ? WHERE id = ? AND provider = 'manual' AND status = 'pending' AND is_activated = 0")
+        .run(transactionId, nowIso, req.adminEmail, note, nowIso, order.id)
+      if (claim.changes !== 1) return null
+      insertPaymentStmt.run({
+        id: crypto.randomUUID(),
+        order_id: order.id,
+        provider: 'manual',
+        provider_transaction_id: `manual:${transactionId}`,
+        amount: order.amount,
+        currency: order.currency,
+        status: 'completed',
+        raw_payload: JSON.stringify({ approvedBy: req.adminEmail, payerName: order.payer_name, reference: order.payment_reference }),
+        created_at: nowIso
+      })
+      return activateSubscription(db, { userEmail: order.user_email, planId: plan.id, days: plan.durationDays, amount: order.amount, currency: order.currency, paymentMethod: 'Bank transfer', orderId: order.id, transactionId, source: 'manual' })
+    })()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    if (message.includes('UNIQUE constraint failed: payments.provider_transaction_id')) {
+      res.status(409).json({ error: 'This transaction was already used', code: 'DUPLICATE_TRANSACTION' })
+      return
+    }
+    sendServerError(res, error, 'Failed to approve purchase request')
+    return
+  }
+
+  if (!activation) {
+    res.status(409).json({ error: `Request is already ${order.status}`, code: 'ALREADY_REVIEWED', status: order.status })
+    return
+  }
+
+  void notifySubscriptionActivated({ userEmail: order.user_email, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID', paymentMethod: 'Bank transfer (approved by administrator)', amount: order.amount, currency: order.currency, dedupeKey: `manual:${order.id}`, fullName: order.customer_name })
+  res.json({ ok: true, status: 'paid', kind: activation.kind, endsAt: activation.subscription.ends_at })
+})
+
+app.post('/api/admin/purchase-requests/:id/reject', adminApiLimiter, requireAdminAuth, (req, res) => {
+  const order = findOrderByIdStmt.get(String(req.params.id ?? ''))
+  if (!order || order.provider !== 'manual') {
+    res.status(404).json({ error: 'Purchase request not found' })
+    return
+  }
+  const note = clampText(req.body?.note ?? '', 300).trim() || null
+  const nowIso = new Date().toISOString()
+  const result = db.prepare("UPDATE payment_orders SET status = 'failed', reviewed_at = ?, reviewed_by = ?, review_note = ?, updated_at = ? WHERE id = ? AND provider = 'manual' AND status = 'pending' AND is_activated = 0")
+    .run(nowIso, req.adminEmail, note, nowIso, order.id)
+  if (result.changes !== 1) {
+    res.status(409).json({ error: `Request is already ${order.status}`, code: 'ALREADY_REVIEWED', status: order.status })
+    return
+  }
+  recordHistory(db, { user_email: order.user_email, event: 'payment_failed', plan_id: order.plan_id, status: 'failed', amount: order.amount, currency: order.currency, payment_method: 'Bank transfer', order_id: order.id, transaction_id: order.payment_reference })
+  res.json({ ok: true, status: 'failed' })
+})
+
+// ─── Demo card checkout (no real charge) ──────────────────────────────────────
+// Enabled unless PAYMENT_MODE=live. The browser validates the card number and sends ONLY the
+// last 4 digits + expiry; the full number and CVV never reach the server, the database or Telegram.
+
+function demoPaymentsEnabled() {
+  return String(process.env.PAYMENT_MODE ?? '').trim().toLowerCase() !== 'live'
+}
+
+app.get('/api/payments/demo/config', (_req, res) => {
+  res.json({ enabled: demoPaymentsEnabled() })
+})
+
+app.post('/api/payments/demo', purchaseRequestLimiter, (req, res) => {
+  const sessionEmail = resolveAuthenticatedUserEmail(req)
+  if (!sessionEmail) {
+    res.status(401).json({ error: 'Authentication required. Please log in.', code: 'AUTH_REQUIRED' })
+    return
+  }
+  if (!demoPaymentsEnabled()) {
+    res.status(503).json({ error: 'Demo checkout is turned off.', code: 'DEMO_DISABLED' })
+    return
+  }
+  const profile = getUserProfileStmt.get(sessionEmail)
+  if (!profile || isProfileBlocked(profile)) {
+    res.status(403).json({ error: 'Account is not allowed to make purchases.', code: 'ACCOUNT_BLOCKED' })
+    return
+  }
+
+  const fullName = clampText(req.body?.fullName, 120).trim()
+  const email = String(req.body?.email ?? '').trim().toLowerCase()
+  const cardLast4 = String(req.body?.cardLast4 ?? '').trim()
+  const cardBrand = ['Visa', 'Mastercard', 'Elcart', 'Card'].includes(req.body?.cardBrand) ? req.body.cardBrand : 'Card'
+  const expiry = String(req.body?.expiry ?? '').trim()
+
+  const missing = []
+  if (fullName.length < 2) missing.push('fullName')
+  if (!email) missing.push('email')
+  if (!/^\d{4}$/.test(cardLast4)) missing.push('cardNumber')
+  if (!expiry) missing.push('expiry')
+  if (missing.length) {
+    res.status(400).json({ error: 'Please fill in all required fields.', code: 'MISSING_FIELDS', fields: missing })
+    return
+  }
+  if (!EMAIL_PATTERN.test(email)) {
+    res.status(400).json({ error: 'Invalid email address.', code: 'INVALID_EMAIL', fields: ['email'] })
+    return
+  }
+  if (email !== sessionEmail) {
+    res.status(400).json({ error: 'Email must match the signed-in account.', code: 'EMAIL_MISMATCH', fields: ['email'] })
+    return
+  }
+  const exp = /^(0[1-9]|1[0-2])\/(\d{2})$/.exec(expiry)
+  const now = new Date()
+  if (!exp || Number(`20${exp[2]}`) * 12 + Number(exp[1]) < now.getUTCFullYear() * 12 + now.getUTCMonth() + 1) {
+    res.status(400).json({ error: 'Card expiry date is invalid or in the past.', code: 'INVALID_EXPIRY', fields: ['expiry'] })
+    return
+  }
+
+  const plan = getPlanById(db, req.body?.planId)
+  if (!plan || plan.id === 'free') {
+    res.status(400).json({ error: 'Unsupported subscription plan', code: 'PLAN_UNSUPPORTED' })
+    return
+  }
+  if (!plan.isEnabled) {
+    res.status(400).json({ error: 'This plan is not available right now', code: 'PLAN_DISABLED' })
+    return
+  }
+  if (PLAN_RANK[plan.id] < PLAN_RANK[getAccessPlan(db, sessionEmail)]) {
+    res.status(409).json({ error: 'Your current plan already includes this plan', code: 'PLAN_INCLUDED' })
+    return
+  }
+  // Double-click protection: one demo payment per user and plan every 15 seconds.
+  const recent = db.prepare("SELECT id FROM payment_orders WHERE user_email = ? AND plan_id = ? AND provider = 'demo' AND datetime(created_at) > datetime(?) LIMIT 1")
+    .get(sessionEmail, plan.id, new Date(Date.now() - 15 * 1000).toISOString())
+  if (recent) {
+    res.status(409).json({ error: 'This payment was just submitted.', code: 'DUPLICATE_SUBMIT' })
+    return
+  }
+
+  const orderId = crypto.randomUUID()
+  const transactionId = `DEMO-${crypto.randomBytes(5).toString('hex').toUpperCase()}`
+  const paymentMethod = `${cardBrand} •••• ${cardLast4}`
+  const nowIso = new Date().toISOString()
+  let activation
+  try {
+    activation = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO payment_orders (id, user_email, plan_id, payment_method, amount, currency, provider, provider_payment_id, status, is_activated,
+          customer_name, customer_email, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'demo', ?, 'paid', 1, ?, ?, ?, ?)
+      `).run(orderId, sessionEmail, plan.id, paymentMethod, plan.price, plan.currency, transactionId, fullName, email, nowIso, nowIso)
+      insertPaymentStmt.run({
+        id: crypto.randomUUID(),
+        order_id: orderId,
+        provider: 'demo',
+        provider_transaction_id: transactionId,
+        amount: plan.price,
+        currency: plan.currency,
+        status: 'completed',
+        raw_payload: JSON.stringify({ demo: true, card: paymentMethod, expiry }),
+        created_at: nowIso
+      })
+      return activateSubscription(db, { userEmail: sessionEmail, planId: plan.id, days: plan.durationDays, amount: plan.price, currency: plan.currency, paymentMethod, orderId, transactionId, source: 'demo' })
+    })()
+  } catch (error) {
+    sendServerError(res, error, 'Failed to complete payment')
+    return
+  }
+
+  void notifySubscriptionActivated({ userEmail: sessionEmail, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID (demo, no real charge)', paymentMethod: `${paymentMethod} (exp ${expiry})`, amount: plan.price, currency: plan.currency, dedupeKey: `demo:${orderId}`, fullName })
+  res.status(201).json({ orderId, transactionId, status: 'paid', planId: plan.id, kind: activation.kind, endsAt: activation.subscription.ends_at, amount: plan.price, currency: plan.currency })
 })
 
 // ─── User Profile & Course Progress Endpoints ─────────────────────────────────
@@ -2460,8 +2970,12 @@ app.post('/api/course-progress', (req, res) => {
   const lessonCountRow = db.prepare('SELECT COUNT(*) AS count FROM lessons WHERE course_id = ? AND is_published = 1').get(courseId)
   const totalLessons = Number(lessonCountRow?.count ?? 0)
 
+  const progressProfile = getUserProfileStmt.get(userEmail)
+  const progressIsAdmin = Boolean(progressProfile && userEmail === config.adminEmail && normalizeRoleName(progressProfile.role) === 'Admin')
+  const allowedLessons = Math.min(totalLessons, lessonLimitFor(getAccessPlan(db, userEmail), true, progressIsAdmin))
+
   const nowIso = new Date().toISOString()
-  const toCount = (value) => Math.min(totalLessons, Math.max(0, Math.floor(Number(value) || 0)))
+  const toCount = (value) => Math.min(allowedLessons, Math.max(0, Math.floor(Number(value) || 0)))
   const completedLessons = toCount(req.body?.completedLessons ?? 0)
   const lessonsStarted = toCount(req.body?.lessonsStarted ?? completedLessons)
 
@@ -2878,6 +3392,12 @@ function pruneExpiredAuthRows() {
 
 pruneExpiredAuthRows()
 setInterval(pruneExpiredAuthRows, 6 * 60 * 60 * 1000).unref()
+
+// Paid subscriptions past their end date become 'expired' (also checked on every read).
+expireDueSubscriptions(db)
+setInterval(() => {
+  try { expireDueSubscriptions(db) } catch (error) { console.error('[BILLING] expiry check failed:', error instanceof Error ? error.message : error) }
+}, 10 * 60 * 1000).unref()
 
 ensureSeedUsers()
 

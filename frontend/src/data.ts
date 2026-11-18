@@ -20,6 +20,8 @@ export type Lesson = {
   task: string
   videoUrl: string
   quiz: QuizQuestion
+  /** Set by the server when the lesson is beyond the viewer's plan (materials are withheld). */
+  locked?: boolean
 }
 
 export type Course = {

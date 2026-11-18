@@ -13,7 +13,8 @@
     "lint": "npm --prefix frontend run lint",
     "preview": "npm --prefix frontend run preview",
     "test:api": "node scripts/test_admin_suite.mjs",
-    "test": "node scripts/test_admin_suite.mjs"
+    "test:billing": "node scripts/test_billing_suite.mjs",
+    "test": "node scripts/test_admin_suite.mjs && node scripts/test_billing_suite.mjs"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
