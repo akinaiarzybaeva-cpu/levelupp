@@ -54,7 +54,7 @@ const newCheckoutKey = () => (typeof crypto !== 'undefined' && 'randomUUID' in c
 
 type Phase = 'form' | 'processing' | 'success'
 
-export default function DemoPaymentModal({ open, onClose, plan, language, onPaid, endsAtText }: {
+export default function PaymentModal({ open, onClose, plan, language, onPaid, endsAtText }: {
   open: boolean
   onClose: (paid: boolean) => void
   plan: DemoPaymentPlan

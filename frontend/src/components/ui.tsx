@@ -6,7 +6,12 @@
  */
 import { useEffect, useId, useState, type ComponentProps, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { Eye, EyeOff, Star, X, type LucideIcon } from 'lucide-react'
+import { Eye, EyeOff, X, type LucideIcon } from 'lucide-react'
+
+// Split into their own files; re-exported here so existing imports keep working.
+export { default as ProgressBar } from './ProgressBar'
+export { default as StarRating } from './RatingStars'
+export { default as StatTile } from './StatisticsCard'
 
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger'
 type ButtonSize = 'sm' | 'md' | 'lg'
@@ -83,54 +88,6 @@ export function PageHero({ eyebrow, title, subtitle, back, actions, aside, class
   )
 }
 
-export function ProgressBar({ value, label, showValue = false }: { value: number; label?: string; showValue?: boolean }) {
-  const safe = Math.max(0, Math.min(100, Math.round(Number(value) || 0)))
-  return (
-    <div className="ui-progress">
-      {(label || showValue) && (
-        <div className="ui-progress-meta">
-          {label && <span>{label}</span>}
-          {showValue && <strong>{safe}%</strong>}
-        </div>
-      )}
-      <div className="progress-bar" role="progressbar" aria-valuenow={safe} aria-valuemin={0} aria-valuemax={100} aria-label={label}>
-        <span style={{ width: `${safe}%` }} />
-      </div>
-    </div>
-  )
-}
-
-/** Read-only stars, or an accessible 1–5 picker when `onChange` is given. */
-export function StarRating({ value, onChange, size = 18, label }: { value: number; onChange?: (value: number) => void; size?: number; label?: string }) {
-  const rounded = Math.round(Number(value) || 0)
-  if (!onChange) {
-    return (
-      <span className="ui-stars" role="img" aria-label={label ?? `${Number(value || 0).toFixed(1)} / 5`}>
-        {[1, 2, 3, 4, 5].map((item) => (
-          <Star key={item} size={size} className={item <= rounded ? 'on' : ''} fill={item <= rounded ? 'currentColor' : 'none'} aria-hidden="true" />
-        ))}
-      </span>
-    )
-  }
-  return (
-    <div className="ui-stars ui-stars-input stars-select" role="radiogroup" aria-label={label}>
-      {[1, 2, 3, 4, 5].map((item) => (
-        <button
-          key={item}
-          type="button"
-          role="radio"
-          aria-checked={rounded === item}
-          aria-label={`${item} / 5`}
-          className={item <= rounded ? 'star-button active' : 'star-button'}
-          onClick={() => onChange(item)}
-        >
-          <Star size={size} fill={item <= rounded ? 'currentColor' : 'none'} aria-hidden="true" />
-        </button>
-      ))}
-    </div>
-  )
-}
-
 /** Password input with a show/hide eye button. */
 export function PasswordInput({ value, onChange, placeholder, showLabel, hideLabel, autoComplete, id, compact }: { value: string; onChange: (value: string) => void; placeholder?: string; showLabel: string; hideLabel: string; autoComplete?: string; id?: string; compact?: boolean }) {
   const [visible, setVisible] = useState(false)
@@ -164,15 +121,6 @@ export function Modal({ open, onClose, title, icon: Icon, children, actions }: {
         {children}
         {actions && <div className="subscription-actions">{actions}</div>}
       </div>
-    </div>
-  )
-}
-
-export function StatTile({ icon: Icon, value, label, tone = 'green' }: { icon: LucideIcon; value: ReactNode; label: ReactNode; tone?: 'green' | 'gold' | 'blue' | 'violet' }) {
-  return (
-    <div className={`stat-card ui-stat-tile tone-${tone}`}>
-      <span className="ui-stat-icon"><Icon size={20} aria-hidden="true" /></span>
-      <div><strong>{value}</strong><span>{label}</span></div>
     </div>
   )
 }

@@ -161,7 +161,11 @@ function webhook(payload, { secret = WEBHOOK_SECRET } = {}) {
   return fetch(`${BASE}/api/payments/webhook/generic`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Signature': signature }, body: raw })
     .then(async (r) => ({ status: r.status, data: await r.json().catch(() => ({})) }))
 }
-const purchaseMessages = () => telegramMessages.filter((m) => m.text.includes('NEW SUBSCRIPTION PURCHASED!'))
+// User purchases use "🟢 НОВАЯ ПОКУПКА"; administrator grants keep the detailed "NEW SUBSCRIPTION PURCHASED!" layout.
+const purchaseMessages = () => telegramMessages.filter((m) => m.text.includes('<b>НОВАЯ ПОКУПКА</b>') || m.text.includes('NEW SUBSCRIPTION PURCHASED!'))
+const purchaseFormatOk = (text, { name, email, plan, price }) =>
+  text.startsWith('🟢 <b>НОВАЯ ПОКУПКА</b>') && text.includes(`👤 Имя: ${name}`) && text.includes(`📧 Email: ${email}`) && text.includes(`📦 Тариф: ${plan}`) &&
+  text.includes(`💰 Стоимость: ${price} сом`) && /📅 Дата: \d{2}\.\d{2}\.\d{4}/.test(text) && text.trimEnd().endsWith('✅ Статус: Активирован')
 async function sqlite(readonly = true) {
   const href = new URL(`file:///${path.join(repoRoot, 'backend', 'node_modules', 'better-sqlite3', 'lib', 'index.js').replace(/\\/g, '/')}`).href
   const { default: Database } = await import(href)
@@ -265,16 +269,13 @@ try {
     const days = Math.round((new Date(sub.endsAt) - Date.now()) / DAY)
     return (r.status === 200 && r.data.activated && r.data.kind === 'new' && sub.accessPlan === 'pro' && sub.status === 'active' && days === 30 && sub.pendingOrder === null) || JSON.stringify({ r, sub })
   })
-  await check('Telegram: exactly one purchase message with correct customer, plan and payment data', async () => {
+  await check('Telegram: exactly one "🟢 НОВАЯ ПОКУПКА" message (name, email, plan, price, date, status), no payment data', async () => {
     await waitFor(() => purchaseMessages().length >= 1)
     const msgs = purchaseMessages()
     const text = msgs[0]?.text ?? ''
     const ok = msgs.length === 1 && msgs[0].chat_id === ADMIN_CHAT && msgs[0].parse_mode === 'HTML' &&
-      text.startsWith('🛒 <b>NEW SUBSCRIPTION PURCHASED!</b>') && text.includes('━━━━━━━━━━━━━━━━━━') &&
-      text.includes('• Full name: Aigerim Test') && text.includes('• Email: ' + student.email) && text.includes('• Username: billing.student') && /• Account ID: #\d+/.test(text) &&
-      text.includes('💎 <b>PURCHASE INFORMATION</b>') && text.includes('• Plan: PRO') && text.includes('• Price: 499 KGS') && text.includes('• Purchase date: ') && text.includes('• Expiration date: ') && text.includes('• Subscription status: ACTIVE') &&
-      text.includes('💳 <b>PAYMENT INFORMATION</b>') && text.includes('• Payment method: O!Деньги') && text.includes('• Transaction ID: <code>TX-PRO-0001</code>') && text.includes('• Payment status: PAID') &&
-      text.trimEnd().endsWith('🚀 LevelUp — Online Education Platform') && !text.includes('• Type:') && !text.includes(BOT_TOKEN)
+      purchaseFormatOk(text, { name: 'Aigerim Test', email: student.email, plan: 'PRO', price: 499 }) &&
+      !/TX-PRO-0001|O!Деньги|card|cvv/i.test(text) && !text.includes(BOT_TOKEN)
     return ok || JSON.stringify({ count: msgs.length, text })
   })
   await check('Duplicate "paid" callbacks do not activate twice or send another Telegram message', async () => {
@@ -305,7 +306,7 @@ try {
     const sub = (await request(`/api/subscription/${student.email}`, { token })).data
     await waitFor(() => purchaseMessages().length >= 2)
     const added = Math.round((new Date(sub.endsAt) - new Date(firstEnd)) / DAY)
-    return (added === 30 && purchaseMessages().length === 2 && purchaseMessages()[1].text.includes('Renewal')) || JSON.stringify({ added, count: purchaseMessages().length })
+    return (added === 30 && purchaseMessages().length === 2 && purchaseFormatOk(purchaseMessages()[1].text, { name: 'Aigerim Test', email: student.email, plan: 'PRO', price: 499 })) || JSON.stringify({ added, count: purchaseMessages().length })
   })
   await check('Upgrade to AI PRO: starts now, AI assistant unlocked (+ Telegram "Upgrade")', async () => {
     const order = (await buy(token, 'aipro', 'MBank')).data
@@ -316,7 +317,7 @@ try {
     const last = purchaseMessages()[2]?.text ?? ''
     const sent = aiRequests.at(-1)
     const viaClaude = ai.data.answer === 'MOCK-CLAUDE answer to: What is a variable?' && sent?.apiKey === AI_KEY && sent.body.model === 'claude-opus-5-5' && /LevelUp/.test(JSON.stringify(sent.body.system))
-    return (r.data.kind === 'upgrade' && sub.accessPlan === 'aipro' && Math.round((new Date(sub.endsAt) - Date.now()) / DAY) === 30 && ai.status === 200 && viaClaude && last.includes('Upgrade') && last.includes('Plan: AI PRO') && last.includes('Price: 799 KGS')) || JSON.stringify({ kind: r.data.kind, plan: sub.accessPlan, ai: ai.status, viaClaude, last })
+    return (r.data.kind === 'upgrade' && sub.accessPlan === 'aipro' && Math.round((new Date(sub.endsAt) - Date.now()) / DAY) === 30 && ai.status === 200 && viaClaude && purchaseFormatOk(last, { name: 'Aigerim Test', email: student.email, plan: 'AI PRO', price: 799 })) || JSON.stringify({ kind: r.data.kind, plan: sub.accessPlan, ai: ai.status, viaClaude, last })
   })
   await check('AI chat: history is forwarded, provider errors map to clear codes (429 / refusal), key never leaks', async () => {
     const withHistory = await request('/api/ai/chat', { method: 'POST', token, body: { question: 'And a constant?', language: 'en', history: [{ role: 'assistant', content: 'welcome' }, { role: 'user', content: 'What is a variable?' }, { role: 'assistant', content: 'A named value.' }] } })
@@ -439,8 +440,8 @@ try {
   await check('Registration notification: same bot and admin chat, exact "NEW USER — LEVELUP" format', async () => {
     const text = telegramMessages[0]?.text ?? ''
     const ok = registrationMessages === 1 && telegramMessages[0].chat_id === ADMIN_CHAT && text.startsWith('🟢 <b>NEW USER — LEVELUP</b>') &&
-      text.includes('👤 Аты-жөнү: Aigerim Test') && text.includes(`📧 Email: ${student.email}`) && /🆔 User ID: #\d+/.test(text) &&
-      text.includes('📅 Катталган күнү: ') && text.includes('🌐 Платформа: LevelUp') && text.includes('✅ Статус: Жаңы колдонуучу катталды') && !text.includes(BOT_TOKEN)
+      text.includes('👤 Имя: Aigerim Test') && text.includes(`📧 Email: ${student.email}`) && /📅 Дата регистрации: \d{2}\.\d{2}\.\d{4}/.test(text) &&
+      text.trimEnd().endsWith('✅ Статус: Успешно зарегистрирован') && !text.includes(BOT_TOKEN)
     return ok || JSON.stringify({ registrationMessages, text })
   })
   await check('Registration: user saved in the DB, exactly one message; login and failed re-registration send none', async () => {
@@ -540,8 +541,7 @@ try {
     const order = (await request(`/api/payments/orders/${manualOrderId}`, { token: buyerToken })).data
     await waitFor(() => purchaseMessages().length > before)
     const text = purchaseMessages().at(-1)?.text ?? ''
-    const fmt = text.includes('• Full name: Bakyt Manualov') && text.includes(`• Email: ${buyer.email}`) && text.includes('• Plan: PRO') && text.includes('• Price: 599 KGS') &&
-      text.includes('• Subscription status: ACTIVE') && text.includes('• Payment method: Bank transfer') && text.includes('<code>MB-2026-000777</code>') && text.includes('• Payment status: PAID')
+    const fmt = purchaseFormatOk(text, { name: 'Bakyt Manualov', email: buyer.email, plan: 'PRO', price: 599 })
     return (r.status === 200 && sub.accessPlan === 'pro' && order.status === 'paid' && order.activated && purchaseMessages().length === before + 1 && fmt) || JSON.stringify({ r: r.data, plan: sub.accessPlan, text })
   })
   await check('Approving twice (or rejecting after approval) changes nothing and sends nothing', async () => {
@@ -591,10 +591,9 @@ try {
     const ai = await request('/api/ai/chat', { method: 'POST', token: cardToken, body: { question: 'hi' } })
     await waitFor(() => telegramMessages.length > beforeAll)
     const text = telegramMessages.at(-1)?.text ?? ''
-    const fmt = text.startsWith('🟢 <b>НОВАЯ ПОКУПКА ТАРИФА LEVELUP</b>') && text.includes('👤 Имя пользователя: Card Demo') && text.includes(`📧 Email: ${cardUser.email}`) &&
-      text.includes('📦 Тариф: AI PRO') && text.includes('💰 Стоимость: 799 сом') && text.includes('📅 Дата покупки: ') && text.includes('✅ Статус: Успешно активирован') && text.includes('💳 Тип оплаты: Demo Payment')
+    const fmt = purchaseFormatOk(text, { name: 'Card Demo', email: cardUser.email, plan: 'AI PRO', price: 799 })
     const noSecrets = !text.includes(LEAK.cardNumber) && !text.includes(LEAK.cvv) && !text.includes(LEAK.expiry)
-    return (r.status === 201 && r.data.status === 'paid' && r.data.accessPlan === 'aipro' && sub.accessPlan === 'aipro' && ai.status === 200 && telegramMessages.length === beforeAll + 1 && purchaseMessages().length === before && fmt && noSecrets) || JSON.stringify({ r: r.data, plan: sub.accessPlan, ai: ai.status, text })
+    return (r.status === 201 && r.data.status === 'paid' && r.data.accessPlan === 'aipro' && sub.accessPlan === 'aipro' && ai.status === 200 && telegramMessages.length === beforeAll + 1 && purchaseMessages().length === before + 1 && fmt && noSecrets) || JSON.stringify({ r: r.data, plan: sub.accessPlan, ai: ai.status, text })
   })
   await check('Demo Payment: the same checkout sent again (double click / retry) does not activate twice or re-notify', async () => {
     const endsBefore = (await request(`/api/subscription/${cardUser.email}`, { token: cardToken })).data.endsAt
@@ -625,6 +624,24 @@ try {
   })
   await check('PAYMENT_MODE=live would disable the demo endpoint (config endpoint reports enabled in tests)', async () =>
     (await request('/api/payments/demo/config')).data.enabled === true)
+
+  // ── Request & review notifications ──────────────────────────────────────────
+  await check('Bank-transfer request: one "📝 НОВАЯ ЗАЯВКА" message per request (pending, not a purchase)', async () => {
+    const reqs = telegramMessages.filter((m) => m.text.startsWith('📝 <b>НОВАЯ ЗАЯВКА</b>'))
+    const first = reqs.find((m) => m.text.includes('MB-2026-000777'))?.text ?? ''
+    return (reqs.length === 2 && first.includes('👤 Имя: Bakyt Manualov') && first.includes(`📧 Email: ${buyer.email}`) && first.includes('📦 Тариф: PRO') && first.includes('💰 Сумма: 599 сом') && first.includes('Ожидает проверки')) || JSON.stringify({ count: reqs.length, first })
+  })
+  await check('Review: a new review sends one "⭐ НОВЫЙ ОТЗЫВ" message; editing it sends nothing', async () => {
+    const isReview = (m) => m.text.startsWith('⭐ <b>НОВЫЙ ОТЗЫВ</b>') && m.text.includes(buyer.email)
+    const body = { lessonId: 'html-lesson-1', lessonLabel: 'HTML — Урок 1', rating: 5, text: 'Очень понятные уроки <b>и</b> практика' }
+    const created = await request('/api/reviews', { method: 'POST', token: buyerToken, body })
+    await waitFor(() => telegramMessages.some(isReview), 3000)
+    const edited = await request('/api/reviews', { method: 'POST', token: buyerToken, body: { ...body, rating: 4, text: 'Изменённый отзыв' } })
+    await sleep(500)
+    const msgs = telegramMessages.filter(isReview)
+    const text = msgs[0]?.text ?? ''
+    return (created.status === 201 && edited.status === 200 && msgs.length === 1 && text.includes('👤 Имя: Bakyt Manual') && text.includes('(5/5)') && text.includes('📚 Урок: HTML — Урок 1') && text.includes('&lt;b&gt;и&lt;/b&gt;')) || JSON.stringify({ created: created.status, edited: edited.status, count: msgs.length, text })
+  })
 } finally {
   server.kill()
   provider.close()

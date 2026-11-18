@@ -87,7 +87,7 @@ const KIND_LABEL = { new: 'New purchase', renewal: 'Renewal', upgrade: 'Upgrade'
 const LINE = '━━━━━━━━━━━━━━━━━━'
 
 export function formatPurchaseMessage(info) {
-  if (info.template === 'demo') return formatDemoPurchaseMessage(info)
+  if (info.kind !== 'admin') return formatUserPurchaseMessage(info)
   // Exact layout requested for admin notifications. Sent only after a verified payment,
   // an admin-approved manual transfer, or an explicit admin grant (paymentStatus says which).
   const lines = [
@@ -125,60 +125,104 @@ export function formatPurchaseMessage(info) {
   return lines.join('\n')
 }
 
+// ─── Event notifications (registration, purchase, request, review) ────────────
+// All go through notifyEvent(): one message per dedupe key (DB-enforced), errors are
+// logged without the token, and nothing here ever throws into the calling request.
+
 export function formatRegistrationMessage(info) {
   return [
     '🟢 <b>NEW USER — LEVELUP</b>',
     '',
-    `👤 Аты-жөнү: ${esc(info.name)}`,
+    `👤 Имя: ${esc(info.name)}`,
     `📧 Email: ${esc(info.email)}`,
-    `🆔 User ID: ${esc(info.userId)}`,
-    `📅 Катталган күнү: ${esc(bishkekTime(info.registeredAt))}`,
-    '🌐 Платформа: LevelUp',
-    '✅ Статус: Жаңы колдонуучу катталды'
+    `📅 Дата регистрации: ${esc(bishkekTime(info.registeredAt))}`,
+    '✅ Статус: Успешно зарегистрирован'
   ].join('\n')
 }
 
-/**
- * New-user notification: sent once per account (dedupe key = email + creation time, so a retried
- * request never sends twice). Never throws — a Telegram problem must not break registration.
- */
-export async function notifyRegistration(db, info) {
+/** Paid / demo purchase by a user. Never contains card number, CVV, expiry or other payment secrets. */
+export function formatUserPurchaseMessage(info) {
+  return [
+    '🟢 <b>НОВАЯ ПОКУПКА</b>',
+    '',
+    `👤 Имя: ${esc(info.name)}`,
+    `📧 Email: ${esc(info.email)}`,
+    `📦 Тариф: ${esc(PLAN_LABEL[info.planId] ?? info.planId)}`,
+    `💰 Стоимость: ${esc(info.amount)} ${esc(info.currency === 'KGS' ? 'сом' : info.currency)}`,
+    `📅 Дата: ${esc(bishkekTime(info.purchasedAt))}`,
+    '✅ Статус: Активирован'
+  ].join('\n')
+}
+
+/** Bank-transfer purchase request waiting for the administrator (not a confirmed payment). */
+export function formatRequestMessage(info) {
+  return [
+    '📝 <b>НОВАЯ ЗАЯВКА</b>',
+    '',
+    `👤 Имя: ${esc(info.name)}`,
+    `📧 Email: ${esc(info.email)}`,
+    `📦 Тариф: ${esc(PLAN_LABEL[info.planId] ?? info.planId)}`,
+    `💰 Сумма: ${esc(info.amount)} ${esc(info.currency === 'KGS' ? 'сом' : info.currency)}`,
+    `🧾 Номер платежа: ${esc(info.reference)}`,
+    `📅 Дата: ${esc(bishkekTime(info.createdAt))}`,
+    '⏳ Статус: Ожидает проверки (Admin → Purchase requests)'
+  ].join('\n')
+}
+
+export function formatReviewMessage(info) {
+  const text = String(info.text ?? '')
+  return [
+    '⭐ <b>НОВЫЙ ОТЗЫВ</b>',
+    '',
+    `👤 Имя: ${esc(info.name)}`,
+    `📧 Email: ${esc(info.email)}`,
+    `⭐ Оценка: ${'★'.repeat(Math.max(0, Math.min(5, Number(info.rating) || 0)))} (${esc(info.rating)}/5)`,
+    `📚 Урок: ${esc(info.lessonLabel)}`,
+    `💬 Текст: ${esc(text.length > 500 ? `${text.slice(0, 500)}…` : text)}`,
+    `📅 Дата: ${esc(bishkekTime(info.createdAt))}`
+  ].join('\n')
+}
+
+/** Sends `text` once per `key`. A previously FAILED send may be retried by calling again with the same key. */
+export async function notifyEvent(db, { key, kind, text, logLabel }) {
   try {
-    const key = `registration:${info.email}:${info.registeredAt}`
-    const claimed = db.prepare("INSERT OR IGNORE INTO telegram_notifications (id, dedupe_key, kind, status, created_at) VALUES (?, ?, 'registration', 'sending', ?)").run(crypto.randomUUID(), key, new Date().toISOString())
-    if (claimed.changes === 0) return { duplicate: true }
-    const result = await sendTelegramMessage(formatRegistrationMessage(info))
+    const claimed = db.prepare("INSERT OR IGNORE INTO telegram_notifications (id, dedupe_key, kind, status, created_at) VALUES (?, ?, ?, 'sending', ?)").run(crypto.randomUUID(), key, kind, new Date().toISOString())
+    if (claimed.changes === 0) {
+      const retry = db.prepare("UPDATE telegram_notifications SET status = 'sending', error = NULL WHERE dedupe_key = ? AND status = 'failed'").run(key)
+      if (retry.changes === 0) return { duplicate: true }
+    }
+    const result = await sendTelegramMessage(text)
     const skipped = !result.ok && /not configured/i.test(result.error ?? '')
     db.prepare('UPDATE telegram_notifications SET status = ?, error = ?, sent_at = ? WHERE dedupe_key = ?')
       .run(result.ok ? 'sent' : skipped ? 'skipped' : 'failed', result.ok ? null : result.error, result.ok ? new Date().toISOString() : null, key)
-    if (!result.ok && !skipped) {
+    if (result.ok) {
       // eslint-disable-next-line no-console
-      console.warn('[TELEGRAM] registration notification failed:', result.error)
-    } else if (result.ok) {
+      console.log(`[TELEGRAM] ${kind} notification sent${logLabel ? ` (${logLabel})` : ''}`)
+    } else if (!skipped) {
       // eslint-disable-next-line no-console
-      console.log(`[TELEGRAM] registration notification sent for user ${info.userId}`)
+      console.warn(`[TELEGRAM] ${kind} notification failed:`, result.error)
     }
     return result.ok ? { sent: true } : { failed: result.error }
   } catch (error) {
     // eslint-disable-next-line no-console
-    console.warn('[TELEGRAM] registration notification error:', error instanceof Error ? error.message : error)
+    console.warn(`[TELEGRAM] ${kind} notification error:`, error instanceof Error ? error.message : error)
     return { failed: 'internal error' }
   }
 }
 
-/** Demo checkout notification (Russian). Never contains card number, CVV or expiry. */
-export function formatDemoPurchaseMessage(info) {
-  return [
-    '🟢 <b>НОВАЯ ПОКУПКА ТАРИФА LEVELUP</b>',
-    '',
-    `👤 Имя пользователя: ${esc(info.name)}`,
-    `📧 Email: ${esc(info.email)}`,
-    `📦 Тариф: ${esc(PLAN_LABEL[info.planId] ?? info.planId)}`,
-    `💰 Стоимость: ${esc(info.amount)} ${esc(info.currency === 'KGS' ? 'сом' : info.currency)}`,
-    `📅 Дата покупки: ${esc(bishkekTime(info.purchasedAt))}`,
-    '✅ Статус: Успешно активирован',
-    '💳 Тип оплаты: Demo Payment'
-  ].join('\n')
+/** New user: once per account (email + creation time). */
+export function notifyRegistration(db, info) {
+  return notifyEvent(db, { key: `registration:${info.email}:${info.registeredAt}`, kind: 'registration', text: formatRegistrationMessage(info), logLabel: info.userId })
+}
+
+/** New bank-transfer request: once per order. */
+export function notifyPurchaseRequest(db, info) {
+  return notifyEvent(db, { key: `request:${info.orderId}`, kind: 'request', text: formatRequestMessage(info), logLabel: info.orderId })
+}
+
+/** New review (edits of an existing review do not notify again): once per review id. */
+export function notifyReview(db, info) {
+  return notifyEvent(db, { key: `review:${info.reviewId}`, kind: 'review', text: formatReviewMessage(info), logLabel: info.reviewId })
 }
 
 /**
@@ -202,6 +246,9 @@ export async function notifyPurchase(db, info, dedupeKey) {
     if (!result.ok) {
       // eslint-disable-next-line no-console
       console.warn('[TELEGRAM] purchase notification failed:', result.error)
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(`[TELEGRAM] purchase notification sent (${dedupeKey})`)
     }
     return result.ok ? { sent: true } : { failed: result.error }
   } catch (error) {

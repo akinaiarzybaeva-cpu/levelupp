@@ -6,7 +6,7 @@ import rateLimit from 'express-rate-limit'
 import { config } from './config/config.js'
 import { db } from './config/db.js'
 import { activateSubscription, cancelSubscription, expireDueSubscriptions, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
-import { initTelegram, notifyPurchase, notifyRegistration, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
+import { initTelegram, notifyPurchase, notifyPurchaseRequest, notifyRegistration, notifyReview, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
 import { AiError, aiConfig, askAssistant } from './ai.js'
 import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './config/provider.js'
 import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail } from './config/email.js'
@@ -2242,6 +2242,8 @@ app.post('/api/reviews', (req, res) => {
   })
 
   res.status(201).json({ ok: true, id: reviewId, created: true })
+  // Only NEW reviews notify the admin (edits of an existing review do not).
+  void notifyReview(db, { reviewId, name: userName, email: userEmail, rating, lessonLabel, text, createdAt: nowIso })
 })
 
 // ─── Payments & Subscriptions Endpoints ────────────────────────────────────────
@@ -2687,6 +2689,8 @@ app.post('/api/payments/manual', purchaseRequestLimiter, (req, res) => {
   }
 
   recordHistory(db, { user_email: sessionEmail, event: 'manual_submitted', plan_id: plan.id, status: 'pending', amount: plan.price, currency: plan.currency, payment_method: 'Bank transfer', order_id: orderId, transaction_id: normalizedReference })
+  // Admin is told a request is waiting; the plan is NOT active until it is approved.
+  void notifyPurchaseRequest(db, { orderId, name: fullName, email: sessionEmail, planId: plan.id, amount: plan.price, currency: plan.currency, reference: normalizedReference, createdAt: nowIso })
   res.status(201).json({ orderId, status: 'pending', planId: plan.id, amount: plan.price, currency: plan.currency, paymentReference: normalizedReference })
 })
 
