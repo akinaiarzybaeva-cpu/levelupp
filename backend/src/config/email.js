@@ -45,50 +45,105 @@ export async function sendEmail({ to, subject, html, text }) {
   return true
 }
 
-export function buildPasswordResetEmail({ resetUrl, expiresMinutes = 30, appName = 'LEVEL UP', isAdmin = false }) {
-  const accountLabel = isAdmin ? 'administrator password' : 'password'
-  const html = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>Password Reset</title></head>
-<body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:40px 20px;">
-  <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 8px rgba(0,0,0,.08)">
-    <h1 style="font-size:24px;margin:0 0 8px;color:#1a1a2e">${appName}</h1>
-    <h2 style="font-size:18px;margin:0 0 24px;color:#333">Password Reset Request</h2>
-    <p style="color:#555;line-height:1.6">We received a request to reset your ${accountLabel}. Click the button below to set a new password.</p>
-    <p style="margin:28px 0">
-      <a href="${resetUrl}" style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;font-size:15px">Reset Password</a>
-    </p>
-    <p style="color:#888;font-size:13px">This link expires in <strong>${expiresMinutes} minutes</strong> and can only be used once.</p>
-    <p style="color:#888;font-size:13px">If you did not request a password reset, you can safely ignore this email.</p>
-    <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
-    <p style="color:#aaa;font-size:12px">© ${new Date().getFullYear()} ${appName}. All rights reserved.</p>
-  </div>
-</body>
-</html>`
-
-  const text = `Password Reset Request\n\nClick the link below to reset your password:\n${resetUrl}\n\nThis link expires in ${expiresMinutes} minutes and can only be used once.\n\nIf you did not request this, ignore this email.`
-
-  return { html, text }
+const EMAIL_TEXT = {
+  ru: {
+    resetSubject: (isAdmin) => (isAdmin ? 'LevelUp Admin — восстановление пароля' : 'LevelUp — восстановление пароля'),
+    resetTitle: 'Восстановление пароля',
+    resetIntro: (isAdmin) => `Мы получили запрос на восстановление пароля ${isAdmin ? 'администратора' : 'вашего аккаунта'} LevelUp. Нажмите кнопку ниже, чтобы создать новый пароль.`,
+    resetButton: 'Создать новый пароль',
+    resetExpiry: (m) => `Ссылка действует <strong>${m} минут</strong> и может быть использована только один раз.`,
+    resetExpiryText: (m) => `Ссылка действует ${m} минут и может быть использована только один раз.`,
+    resetWarning: 'Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо — ваш пароль не изменится. Никому не пересылайте эту ссылку.',
+    linkHint: 'Если кнопка не работает, скопируйте ссылку в браузер:',
+    changedSubject: (isAdmin) => (isAdmin ? 'LevelUp Admin — пароль изменён' : 'LevelUp — пароль изменён'),
+    changedTitle: 'Пароль изменён',
+    changedIntro: (isAdmin) => `Пароль ${isAdmin ? 'администратора' : 'вашего аккаунта'} LevelUp только что был изменён. Все активные сессии завершены.`,
+    changedWarning: 'Если это были не вы, немедленно восстановите пароль через «Забыли пароль?» и свяжитесь с поддержкой.',
+    rights: 'Все права защищены.'
+  },
+  kg: {
+    resetSubject: (isAdmin) => (isAdmin ? 'LevelUp Admin — сырсөздү калыбына келтирүү' : 'LevelUp — сырсөздү калыбына келтирүү'),
+    resetTitle: 'Сырсөздү калыбына келтирүү',
+    resetIntro: (isAdmin) => `LevelUp ${isAdmin ? 'администраторунун' : 'аккаунтуңуздун'} сырсөзүн калыбына келтирүү сурамы келди. Жаңы сырсөз түзүү үчүн төмөнкү баскычты басыңыз.`,
+    resetButton: 'Жаңы сырсөз түзүү',
+    resetExpiry: (m) => `Шилтеме <strong>${m} мүнөт</strong> жарактуу жана бир гана жолу колдонулат.`,
+    resetExpiryText: (m) => `Шилтеме ${m} мүнөт жарактуу жана бир гана жолу колдонулат.`,
+    resetWarning: 'Эгер сиз сырсөздү калыбына келтирүүнү сураган эмес болсоңуз, бул катты этибарга албаңыз — сырсөзүңүз өзгөрбөйт. Бул шилтемени эч кимге жөнөтпөңүз.',
+    linkHint: 'Баскыч иштебесе, шилтемени браузерге көчүрүңүз:',
+    changedSubject: (isAdmin) => (isAdmin ? 'LevelUp Admin — сырсөз өзгөртүлдү' : 'LevelUp — сырсөз өзгөртүлдү'),
+    changedTitle: 'Сырсөз өзгөртүлдү',
+    changedIntro: (isAdmin) => `LevelUp ${isAdmin ? 'администраторунун' : 'аккаунтуңуздун'} сырсөзү азыр эле өзгөртүлдү. Бардык активдүү сессиялар жабылды.`,
+    changedWarning: 'Эгер бул сиз болбосоңуз, «Сырсөздү унуттуңузбу?» аркылуу сырсөздү дароо калыбына келтирип, колдоо кызматына кайрылыңыз.',
+    rights: 'Бардык укуктар корголгон.'
+  },
+  en: {
+    resetSubject: (isAdmin) => (isAdmin ? 'LevelUp Admin — password reset' : 'LevelUp — password reset'),
+    resetTitle: 'Password reset',
+    resetIntro: (isAdmin) => `We received a request to reset the ${isAdmin ? 'administrator' : 'account'} password for LevelUp. Click the button below to create a new password.`,
+    resetButton: 'Create new password',
+    resetExpiry: (m) => `The link is valid for <strong>${m} minutes</strong> and can be used only once.`,
+    resetExpiryText: (m) => `The link is valid for ${m} minutes and can be used only once.`,
+    resetWarning: 'If you did not request a password reset, ignore this email — your password will not change. Do not forward this link to anyone.',
+    linkHint: 'If the button does not work, copy this link into your browser:',
+    changedSubject: (isAdmin) => (isAdmin ? 'LevelUp Admin — password changed' : 'LevelUp — password changed'),
+    changedTitle: 'Password changed',
+    changedIntro: (isAdmin) => `The ${isAdmin ? 'administrator' : 'account'} password for LevelUp was just changed. All active sessions were signed out.`,
+    changedWarning: 'If this was not you, reset the password via “Forgot password?” right away and contact support.',
+    rights: 'All rights reserved.'
+  }
 }
 
-export function buildPasswordChangedEmail({ appName = 'LEVEL UP', isAdmin = false }) {
-  const accountLabel = isAdmin ? 'administrator password' : 'password'
-  const html = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>Password Changed</title></head>
-<body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:40px 20px;">
-  <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 8px rgba(0,0,0,.08)">
-    <h1 style="font-size:24px;margin:0 0 8px;color:#1a1a2e">${appName}</h1>
-    <h2 style="font-size:18px;margin:0 0 24px;color:#333">Password Changed Successfully</h2>
-    <p style="color:#555;line-height:1.6">Your ${accountLabel} was just changed. If this was you, no action is needed.</p>
-    <p style="color:#e53e3e;line-height:1.6">If you did not change your password, contact support immediately and secure your account.</p>
-    <hr style="border:none;border-top:1px solid #eee;margin:28px 0">
-    <p style="color:#aaa;font-size:12px">© ${new Date().getFullYear()} ${appName}. All rights reserved.</p>
-  </div>
+export const emailLanguage = (value) => (['kg', 'ru', 'en'].includes(value) ? value : 'ru')
+const escHtml = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+function emailLayout({ lang, logoUrl, title, body }) {
+  const logo = logoUrl
+    ? `<img src="${escHtml(logoUrl)}" width="120" height="80" alt="LevelUp" style="display:block;margin:0 auto 8px;border:0;outline:none">`
+    : '<div style="font-size:26px;font-weight:800;color:#0b7f4a;text-align:center;margin-bottom:8px">LevelUp</div>'
+  return `<!DOCTYPE html>
+<html lang="${lang === 'kg' ? 'ky' : lang}">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escHtml(title)}</title></head>
+<body style="margin:0;padding:0;background:#eef6f1;font-family:Arial,Helvetica,sans-serif;color:#0e1b2b">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef6f1;padding:32px 12px">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 10px 30px rgba(6,40,29,.10)">
+        <tr><td style="height:6px;background:linear-gradient(90deg,#0b7f4a,#1fbf6e,#3ee08f);font-size:0;line-height:0">&nbsp;</td></tr>
+        <tr><td style="padding:32px 32px 8px;text-align:center">${logo}
+          <h1 style="margin:12px 0 0;font-size:22px;line-height:1.3;color:#06281d">${escHtml(title)}</h1>
+        </td></tr>
+        <tr><td style="padding:8px 32px 28px;font-size:15px;line-height:1.6;color:#4b5b6b">${body}</td></tr>
+        <tr><td style="padding:16px 32px;background:#f4f8f6;font-size:12px;color:#6b7a88;text-align:center">© ${new Date().getFullYear()} LevelUp. ${escHtml(EMAIL_TEXT[lang].rights)}</td></tr>
+      </table>
+    </td></tr>
+  </table>
 </body>
 </html>`
+}
 
-  return { html }
+export function buildPasswordResetEmail({ resetUrl, expiresMinutes = 30, isAdmin = false, language = 'ru', logoUrl = '' }) {
+  const lang = emailLanguage(language)
+  const T = EMAIL_TEXT[lang]
+  const safeUrl = escHtml(resetUrl)
+  const body = `
+    <p style="margin:0 0 20px">${escHtml(T.resetIntro(isAdmin))}</p>
+    <p style="margin:0 0 24px;text-align:center">
+      <a href="${safeUrl}" style="display:inline-block;background:#0b7f4a;color:#ffffff;text-decoration:none;padding:14px 30px;border-radius:999px;font-weight:700;font-size:15px">${escHtml(T.resetButton)}</a>
+    </p>
+    <p style="margin:0 0 12px;padding:12px 14px;background:#e7f8ee;border-radius:12px;color:#06281d;font-size:14px">⏱ ${T.resetExpiry(expiresMinutes)}</p>
+    <p style="margin:0 0 18px;padding:12px 14px;background:#fff4e5;border-radius:12px;color:#8a4b00;font-size:14px">⚠ ${escHtml(T.resetWarning)}</p>
+    <p style="margin:0;font-size:12px;color:#6b7a88">${escHtml(T.linkHint)}<br><a href="${safeUrl}" style="color:#0b7f4a;word-break:break-all">${safeUrl}</a></p>`
+  const html = emailLayout({ lang, logoUrl, title: T.resetTitle, body })
+  const text = `${T.resetTitle}\n\n${T.resetIntro(isAdmin)}\n\n${T.resetButton}: ${resetUrl}\n\n${T.resetExpiryText(expiresMinutes)}\n\n${T.resetWarning}`
+  return { html, text, subject: T.resetSubject(isAdmin) }
+}
+
+export function buildPasswordChangedEmail({ isAdmin = false, language = 'ru', logoUrl = '' }) {
+  const lang = emailLanguage(language)
+  const T = EMAIL_TEXT[lang]
+  const body = `
+    <p style="margin:0 0 16px">${escHtml(T.changedIntro(isAdmin))}</p>
+    <p style="margin:0;padding:12px 14px;background:#fdecec;border-radius:12px;color:#9b1c1c;font-size:14px">⚠ ${escHtml(T.changedWarning)}</p>`
+  const html = emailLayout({ lang, logoUrl, title: T.changedTitle, body })
+  const text = `${T.changedTitle}\n\n${T.changedIntro(isAdmin)}\n\n${T.changedWarning}`
+  return { html, text, subject: T.changedSubject(isAdmin) }
 }

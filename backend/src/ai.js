@@ -40,7 +40,8 @@ function buildSystemPrompt(language, topic) {
   const lang = LANGUAGE_NAMES[language] ?? LANGUAGE_NAMES.ru
   return [
     'You are the AI Pro tutor of LevelUp, an online IT education platform for students in Kyrgyzstan.',
-    `Answer in ${lang}. If the language is Kyrgyz, write correct literary Kyrgyz and do not mix in Kazakh words.`,
+    `Answer in ${lang}, even if earlier messages in the conversation are in another language. If the language is Kyrgyz, write correct literary Kyrgyz and do not mix in Kazakh words.`,
+    'Give a complete, well-structured answer: a short definition, how it works, a practical example, and a tip on what to learn next. Use Markdown headings, lists and fenced code blocks.',
     `The student is currently studying: ${topic}.`,
     'Explain clearly and step by step, at the level of a motivated beginner. Use short code examples in Markdown code blocks when they help.',
     'If the question is unrelated to programming, IT or studying, answer briefly and steer back to learning.',
@@ -100,4 +101,62 @@ export async function askAssistant({ question, topic, language, history = [] }) 
   }
 
   return { answer, model: response.model, truncated: response.stop_reason === 'max_tokens' }
+}
+
+// ─── Chat history (per authenticated user, stored server-side) ───────────────
+const HISTORY_LIMIT = 200
+
+export function initAiHistory(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ai_chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_email TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+      content TEXT NOT NULL,
+      language TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_user ON ai_chat_messages (user_email, id);
+  `)
+}
+
+export function listAiHistory(db, userEmail, limit = 100) {
+  const rows = db.prepare('SELECT id, role, content, language, created_at FROM ai_chat_messages WHERE user_email = ? ORDER BY id DESC LIMIT ?').all(userEmail, limit)
+  return rows.reverse().map((row) => ({ id: String(row.id), role: row.role, text: row.content, language: row.language, createdAt: row.created_at }))
+}
+
+// Saves one question/answer pair. With replaceLast the previous answer to the same question
+// (the one being regenerated) is replaced instead of duplicated.
+export function saveAiExchange(db, { userEmail, question, answer, language, replaceLast = false }) {
+  const tx = db.transaction(() => {
+    if (replaceLast) {
+      const last = db.prepare('SELECT id, role, content FROM ai_chat_messages WHERE user_email = ? ORDER BY id DESC LIMIT 2').all(userEmail)
+      if (last.length === 2 && last[0].role === 'assistant' && last[1].role === 'user' && last[1].content === question) {
+        db.prepare('DELETE FROM ai_chat_messages WHERE id IN (?, ?)').run(last[0].id, last[1].id)
+      }
+    }
+    const now = new Date()
+    const insert = db.prepare('INSERT INTO ai_chat_messages (user_email, role, content, language, created_at) VALUES (?, ?, ?, ?, ?)')
+    const q = insert.run(userEmail, 'user', question, language, now.toISOString())
+    const a = insert.run(userEmail, 'assistant', answer, language, new Date(now.getTime() + 1).toISOString())
+    db.prepare(`DELETE FROM ai_chat_messages WHERE user_email = ? AND id NOT IN (
+      SELECT id FROM ai_chat_messages WHERE user_email = ? ORDER BY id DESC LIMIT ?)`).run(userEmail, userEmail, HISTORY_LIMIT)
+    return { questionId: String(q.lastInsertRowid), answerId: String(a.lastInsertRowid) }
+  })
+  return tx()
+}
+
+export function clearAiHistory(db, userEmail) {
+  return db.prepare('DELETE FROM ai_chat_messages WHERE user_email = ?').run(userEmail).changes
+}
+
+// Deletes one saved question together with the answer that directly follows it.
+export function deleteAiExchange(db, userEmail, questionId) {
+  const id = Number(questionId)
+  if (!Number.isInteger(id) || id <= 0) return 0
+  const question = db.prepare("SELECT id FROM ai_chat_messages WHERE id = ? AND user_email = ? AND role = 'user'").get(id, userEmail)
+  if (!question) return 0
+  const next = db.prepare('SELECT id, role FROM ai_chat_messages WHERE user_email = ? AND id > ? ORDER BY id ASC LIMIT 1').get(userEmail, id)
+  const ids = next && next.role === 'assistant' ? [id, next.id] : [id]
+  return db.prepare(`DELETE FROM ai_chat_messages WHERE user_email = ? AND id IN (${ids.map(() => '?').join(',')})`).run(userEmail, ...ids).changes
 }

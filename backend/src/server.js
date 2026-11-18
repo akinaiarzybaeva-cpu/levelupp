@@ -7,9 +7,12 @@ import { config } from './config/config.js'
 import { db } from './config/db.js'
 import { activateSubscription, cancelSubscription, expireDueSubscriptions, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
 import { initTelegram, notifyPurchase, notifyPurchaseRequest, notifyRegistration, notifyReview, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
-import { AiError, aiConfig, askAssistant } from './ai.js'
+import { AiError, aiConfig, askAssistant, clearAiHistory, deleteAiExchange, initAiHistory, listAiHistory, saveAiExchange } from './ai.js'
 import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './config/provider.js'
-import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail } from './config/email.js'
+import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail, emailLanguage } from './config/email.js'
+
+/** Public URL of the e-mail logo (frontend/public/email/levelup-logo.png). */
+const emailLogoUrl = () => (config.frontendUrl ? `${String(config.frontendUrl).replace(/\/+$/, '')}/email/levelup-logo.png` : '')
 
 const app = express()
 
@@ -116,6 +119,7 @@ const adminApiLimiter = rateLimit({
 // ─── Database Prepared Statements ──────────────────────────────────────────────
 
 initBilling(db)
+initAiHistory(db)
 initTelegram(db)
 
 const insertOrderStmt = db.prepare(`
@@ -1139,6 +1143,7 @@ app.delete('/api/admin/users/:userEmail', adminApiLimiter, requireAdminAuth, (re
     db.prepare('DELETE FROM password_reset_tokens WHERE user_email = ?').run(userEmail)
     // Reviews carry the user's email and name; remove them with the account.
     db.prepare('DELETE FROM reviews WHERE user_email = ?').run(userEmail)
+    db.prepare('DELETE FROM ai_chat_messages WHERE user_email = ?').run(userEmail)
     // payment_orders / payments are kept intentionally as financial records.
   })
 
@@ -1780,7 +1785,9 @@ app.post('/api/ai/chat', async (req, res) => {
 
     const lang = ['kg', 'ru', 'en'].includes(language) ? language : 'ru'
     const result = await askAssistant({ question, topic, language: lang, history })
-    res.json({ ok: true, answer: result.answer, model: result.model, truncated: result.truncated })
+    // Only real answers are stored; a failed call leaves the saved history untouched.
+    const saved = saveAiExchange(db, { userEmail, question, answer: result.answer, language: lang, replaceLast: req.body?.regenerate === true })
+    res.json({ ok: true, answer: result.answer, model: result.model, truncated: result.truncated, questionId: saved.questionId, answerId: saved.answerId })
   } catch (err) {
     if (err instanceof AiError) {
       res.status(err.status).json({ error: err.message, code: err.code })
@@ -1788,6 +1795,41 @@ app.post('/api/ai/chat', async (req, res) => {
     }
     sendServerError(res, err, 'AI service error')
   }
+})
+
+// The signed-in user's own saved AI conversation (no plan check: reading or deleting your own
+// history is always allowed, sending new questions still requires AI PRO above).
+app.get('/api/ai/history', (req, res) => {
+  const userEmail = resolveAuthenticatedUserEmail(req)
+  if (!userEmail) {
+    res.status(401).json({ error: 'Authentication required. Please log in.' })
+    return
+  }
+  res.json({ ok: true, messages: listAiHistory(db, userEmail) })
+})
+
+app.delete('/api/ai/history', (req, res) => {
+  const userEmail = resolveAuthenticatedUserEmail(req)
+  if (!userEmail) {
+    res.status(401).json({ error: 'Authentication required. Please log in.' })
+    return
+  }
+  const deleted = clearAiHistory(db, userEmail)
+  res.json({ ok: true, deleted })
+})
+
+app.delete('/api/ai/history/:messageId', (req, res) => {
+  const userEmail = resolveAuthenticatedUserEmail(req)
+  if (!userEmail) {
+    res.status(401).json({ error: 'Authentication required. Please log in.' })
+    return
+  }
+  const deleted = deleteAiExchange(db, userEmail, req.params.messageId)
+  if (!deleted) {
+    res.status(404).json({ error: 'Message not found' })
+    return
+  }
+  res.json({ ok: true, deleted })
 })
 
 // ─── ADMIN: Reviews moderation ────────────────────────────────────────────────
@@ -2137,7 +2179,7 @@ app.put('/api/admin/settings/password', adminApiLimiter, requireAdminAuth, async
   void sendEmail({
     to: userEmail,
     subject: 'Your LEVEL UP admin password was changed',
-    ...buildPasswordChangedEmail({ appName: 'LEVEL UP', isAdmin: true })
+    ...buildPasswordChangedEmail({ isAdmin: true, language: emailLanguage(req.body?.language), logoUrl: emailLogoUrl() })
   }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('Failed to send password-changed email:', err)
@@ -3261,11 +3303,12 @@ app.post('/api/auth/forgot-password', passwordResetLimiter, async (req, res) => 
   const resetPath = isAdminAccount ? '/admin/reset-password' : '/reset-password'
   const resetUrl = `${frontendUrl}${resetPath}?token=${encodeURIComponent(rawToken)}&id=${encodeURIComponent(tokenId)}`
 
-  const emailContent = buildPasswordResetEmail({ resetUrl, expiresMinutes: 30, isAdmin: isAdminAccount })
+  const emailContent = buildPasswordResetEmail({ resetUrl, expiresMinutes: 30, isAdmin: isAdminAccount, language: emailLanguage(req.body?.language), logoUrl: emailLogoUrl() })
   const emailSent = await sendEmail({
     to: email,
-    subject: isAdminAccount ? 'LEVEL UP Admin — Password Reset Request' : 'LEVEL UP — Password Reset Request',
-    ...emailContent
+    subject: emailContent.subject,
+    html: emailContent.html,
+    text: emailContent.text
   }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('Failed to send reset email:', err)
@@ -3388,7 +3431,7 @@ app.post('/api/auth/reset-password', passwordResetLimiter, (req, res) => {
   void sendEmail({
     to: userEmail,
     subject: isAdminAccount ? 'Your LEVEL UP admin password was changed' : 'Your LEVEL UP password was changed',
-    ...buildPasswordChangedEmail({ appName: 'LEVEL UP', isAdmin: isAdminAccount })
+    ...buildPasswordChangedEmail({ isAdmin: isAdminAccount, language: emailLanguage(req.body?.language), logoUrl: emailLogoUrl() })
   }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('Failed to send password-changed confirmation email:', err)

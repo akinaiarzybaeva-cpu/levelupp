@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Bell, X, AlertCircle, CheckCircle } from 'lucide-react'
 import { apiFetch, createClientId } from '../api'
+import { useAdminT } from './adminI18n'
 
 export type AdminStats = {
   totalUsers: number
@@ -162,6 +163,7 @@ export type AdminSection =
   | 'plans'
   | 'requests'
   | 'purchases'
+  | 'account'
   | 'settings'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -220,13 +222,14 @@ export type ToastKind = 'success' | 'error' | 'info'
 export type Toast = { id: string; message: string; kind: ToastKind }
 
 export function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: string) => void }) {
+  const t = useAdminT()
   return (
     <div className="admin-toast-container">
       {toasts.map((toast) => (
         <div key={toast.id} className={`admin-toast admin-toast-${toast.kind}`}>
           {toast.kind === 'success' ? <CheckCircle size={16} /> : toast.kind === 'error' ? <AlertCircle size={16} /> : <Bell size={16} />}
-          <span>{toast.message}</span>
-          <button type="button" onClick={() => onRemove(toast.id)} aria-label="Dismiss"><X size={14} /></button>
+          <span>{t(toast.message)}</span>
+          <button type="button" onClick={() => onRemove(toast.id)} aria-label={t("Dismiss")}><X size={14} /></button>
         </div>
       ))}
     </div>
@@ -252,14 +255,15 @@ export function useToast() {
 // ─── Confirm dialog ───────────────────────────────────────────────────────────
 
 export function ConfirmDialog({ message, onConfirm, onCancel }: { message: string; onConfirm: () => void; onCancel: () => void }) {
+  const t = useAdminT()
   return (
     <div className="admin-confirm-backdrop">
       <div className="admin-confirm-card">
         <AlertCircle size={24} className="admin-confirm-icon" />
-        <p>{message}</p>
+        <p>{t(message)}</p>
         <div className="admin-confirm-actions">
-          <button type="button" className="btn btn-secondary small" onClick={onCancel}>Cancel</button>
-          <button type="button" className="btn btn-danger small" onClick={onConfirm}>Confirm</button>
+          <button type="button" className="btn btn-secondary small" onClick={onCancel}>{t("Cancel")}</button>
+          <button type="button" className="btn btn-danger small" onClick={onConfirm}>{t("Confirm")}</button>
         </div>
       </div>
     </div>
@@ -270,28 +274,29 @@ export function ConfirmDialog({ message, onConfirm, onCancel }: { message: strin
 
 /** Bar charts built only from the real /api/admin/stats numbers (no invented data). */
 export function AdminInsights({ stats }: { stats: AdminStats }) {
+  const t = useAdminT()
   const groups = [
     {
-      title: 'Learning funnel',
+      title: t("Learning funnel"),
       rows: [
-        { label: 'Users', value: stats.totalUsers },
-        { label: 'Courses started', value: stats.startedCourses },
-        { label: 'Courses completed', value: stats.completedCourses }
+        { label: t("Users"), value: stats.totalUsers },
+        { label: t("Courses started"), value: stats.startedCourses },
+        { label: t("Courses completed"), value: stats.completedCourses }
       ]
     },
     {
-      title: 'Subscriptions',
+      title: t("Subscriptions"),
       rows: [
-        { label: 'Active', value: stats.activeSubscriptions },
-        { label: 'PRO', value: stats.proSubscriptions },
-        { label: 'AI PRO', value: stats.aiproSubscriptions }
+        { label: t("Active"), value: stats.activeSubscriptions },
+        { label: t("PRO"), value: stats.proSubscriptions },
+        { label: t("AI PRO"), value: stats.aiproSubscriptions }
       ]
     },
     {
-      title: 'Reviews moderation',
+      title: t("Reviews moderation"),
       rows: [
-        { label: 'Published', value: Math.max(0, stats.totalReviews - stats.pendingReviews) },
-        { label: 'Pending', value: stats.pendingReviews }
+        { label: t("Published"), value: Math.max(0, stats.totalReviews - stats.pendingReviews) },
+        { label: t("Pending"), value: stats.pendingReviews }
       ]
     }
   ]
@@ -306,7 +311,7 @@ export function AdminInsights({ stats }: { stats: AdminStats }) {
             <div className="admin-bars">
               {group.rows.map((row) => (
                 <div key={row.label} className="admin-bar-row">
-                  <span>{row.label}</span>
+                  <span>{t(row.label)}</span>
                   <div className="admin-bar-track" role="img" aria-label={`${row.label}: ${row.value}`}>
                     <div className="admin-bar-fill" style={{ width: `${Math.round(((Number(row.value) || 0) / max) * 100)}%` }} />
                   </div>

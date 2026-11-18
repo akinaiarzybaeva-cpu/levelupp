@@ -1,129 +1,242 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Clock3, MessageSquareText, Paperclip, Plus, SendHorizonal, Sparkles, Trash2, Lightbulb } from 'lucide-react'
+import { ChevronDown, Clock3, Lock, MessageSquareText, Plus, SendHorizonal, Sparkles, Trash2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { callAiAssistant } from '../aiService'
+import { callAiAssistant, clearAiHistory, deleteAiExchange, fetchAiHistory } from '../aiService'
 import siteLogo from '../assets/logo.webp'
 import { type UserSubscription } from '../subscriptionService'
-import { translations, pick, hasActiveAiAccess, type Lang, type Message } from '../appShared'
+import { translations, hasActiveAiAccess, type Lang, type Message } from '../appShared'
 import AIMessage from './AIMessage'
+import { AI_CATEGORIES, AI_KEY_QUESTIONS, AI_UI, type AiCategory } from './aiKeyQuestions'
 
+/** Kept for backwards compatibility: the first suggestions are now the 15 key questions. */
 export const aiSuggestions: Record<Lang, string[]> = {
-  kg: ['HTML деген эмне жана эмнеден баштоо керек?', "JavaScript'те функция кантип жазылат?", "CSS Flexbox менен Grid'дин айырмасы", 'Программалоону үйрөнүү үчүн план түзүп бер'],
-  ru: ['Что такое HTML и с чего начать?', 'Как написать функцию в JavaScript?', 'Чем отличается Flexbox от Grid в CSS?', 'Составь план изучения программирования'],
-  en: ['What is HTML and where do I start?', 'How do I write a function in JavaScript?', 'Flexbox vs Grid in CSS — what is the difference?', 'Make me a plan to learn programming']
+  kg: AI_KEY_QUESTIONS.map((q) => q.text.kg),
+  ru: AI_KEY_QUESTIONS.map((q) => q.text.ru),
+  en: AI_KEY_QUESTIONS.map((q) => q.text.en),
+}
+
+type ChatMessage = Message & { createdAt?: string }
+
+const LOCALES: Record<Lang, string> = { kg: 'ky-KG', ru: 'ru-RU', en: 'en-US' }
+
+function KeyQuestions({ language, locked, disabled, pricingPath, onAsk, open, onToggle }: {
+  language: Lang
+  locked: boolean
+  disabled: boolean
+  pricingPath: string
+  onAsk: (text: string) => void
+  open: boolean
+  onToggle: () => void
+}) {
+  const ui = AI_UI[language]
+  const [category, setCategory] = useState<AiCategory | 'all'>('all')
+  const visible = AI_KEY_QUESTIONS.filter((q) => category === 'all' || q.category === category)
+  const labelOf = (id: AiCategory) => AI_CATEGORIES.find((c) => c.id === id)?.label[language] ?? id
+
+  return (
+    <section className={`ai-key-questions${open ? ' is-open' : ''}`} aria-label={ui.keyQuestions}>
+      <button type="button" className="ai-key-head" onClick={onToggle} aria-expanded={open}>
+        <span className="ai-key-title">
+          <Sparkles size={16} />
+          <strong>{ui.keyQuestions}</strong>
+          <span className="ai-key-count">{AI_KEY_QUESTIONS.length} {ui.questionsCount}</span>
+        </span>
+        <span className="ai-key-toggle">{open ? ui.hide : ui.show}<ChevronDown size={16} /></span>
+      </button>
+
+      {open && (
+        <>
+          <p className="ai-key-hint">{locked ? ui.lockedText : ui.keyQuestionsHint}</p>
+          <div className="ai-key-cats" role="tablist">
+            <button type="button" role="tab" aria-selected={category === 'all'} className={category === 'all' ? 'active' : ''} onClick={() => setCategory('all')}>{ui.all}</button>
+            {AI_CATEGORIES.map((c) => (
+              <button key={c.id} type="button" role="tab" aria-selected={category === c.id} className={category === c.id ? `active cat-${c.id}` : `cat-${c.id}`} onClick={() => setCategory(c.id)}>
+                {c.label[language]}
+              </button>
+            ))}
+          </div>
+          <div className="ai-key-grid">
+            {visible.map((q) => {
+              const Icon = q.icon
+              const body = (
+                <>
+                  <span className={`ai-key-icon cat-${q.category}`}><Icon size={17} /></span>
+                  <span className="ai-key-text">
+                    <small>{labelOf(q.category)}</small>
+                    <span>{q.text[language]}</span>
+                  </span>
+                  {locked && <Lock size={14} className="ai-key-lock" />}
+                </>
+              )
+              return locked ? (
+                <Link key={q.id} to={pricingPath} className="ai-key-card locked" data-question-id={q.id}>{body}</Link>
+              ) : (
+                <button key={q.id} type="button" className="ai-key-card" data-question-id={q.id} disabled={disabled} onClick={() => onAsk(q.text[language])}>
+                  {body}
+                </button>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </section>
+  )
 }
 
 export default function AIChat({ language, subscription, userEmail, pricingPath }: { language: Lang; subscription?: UserSubscription; userEmail?: string; pricingPath: string }) {
   const t = translations[language]
+  const ui = AI_UI[language]
   const isAiUnlocked = hasActiveAiAccess(subscription)
-  const bottomRef = useRef<HTMLDivElement | null>(null)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const storageKey = userEmail ? `levelup-ai-chat-history:${userEmail}` : null
-  const welcomeMessage = useMemo<Message>(() => ({ id: 'welcome', role: 'assistant', text: t.ai.welcome }), [t.ai.welcome])
-  const [messages, setMessages] = useState<Message[]>(() => [welcomeMessage])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [historyLoaded, setHistoryLoaded] = useState(false)
+  const [historyFailed, setHistoryFailed] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [questionsOpen, setQuestionsOpen] = useState(true)
+  const welcomeMessage = useMemo<ChatMessage>(() => ({ id: 'welcome', role: 'assistant', text: t.ai.welcome }), [t.ai.welcome])
 
+  // Saved conversation of the signed-in user (stored on the server, not in the browser).
   useEffect(() => {
-    if (!storageKey || typeof window === 'undefined') {
-      setMessages([welcomeMessage])
+    let cancelled = false
+    setHistoryLoaded(false)
+    setHistoryFailed(false)
+    setMessages([])
+    if (!userEmail) {
+      setHistoryLoaded(true)
       return
     }
+    // Older versions kept the chat in localStorage; the server is the source of truth now.
+    try { window.localStorage.removeItem(`levelup-ai-chat-history:${userEmail}`) } catch { /* storage unavailable */ }
+    fetchAiHistory()
+      .then((saved) => {
+        if (cancelled) return
+        setMessages(saved.map((m) => ({ id: m.id, role: m.role, text: m.text, createdAt: m.createdAt })))
+        if (saved.length > 0) setQuestionsOpen(false)
+      })
+      .catch(() => { if (!cancelled) setHistoryFailed(true) })
+      .finally(() => { if (!cancelled) setHistoryLoaded(true) })
+    return () => { cancelled = true }
+  }, [userEmail])
 
-    const raw = window.localStorage.getItem(storageKey)
-    if (!raw) {
-      setMessages([welcomeMessage])
-      return
-    }
-
-    try {
-      const parsed = JSON.parse(raw) as Message[]
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        setMessages(parsed)
-      } else {
-        setMessages([welcomeMessage])
-      }
-    } catch {
-      setMessages([welcomeMessage])
-    }
-  }, [storageKey, welcomeMessage])
-
+  // Keep the newest message (or the "thinking" indicator) in view.
   useEffect(() => {
-    if (!storageKey || typeof window === 'undefined') return
-    window.localStorage.setItem(storageKey, JSON.stringify(messages))
-  }, [messages, storageKey])
+    const list = listRef.current
+    if (!list || !historyLoaded) return
+    list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' })
+  }, [messages, isLoading, historyLoaded])
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isLoading])
+  const toHistory = (items: ChatMessage[]) => items.map((m) => ({ role: m.role, content: m.text }))
 
   const sendQuestion = async (question: string) => {
     const trimmed = question.trim()
     if (!trimmed || isLoading || !isAiUnlocked) return
 
     setError(null)
-    const userMessage: Message = { id: Date.now().toString(), role: 'user', text: trimmed }
-    setMessages((current) => [...current, userMessage])
+    setConfirmClear(false)
+    const previous = messages
+    const tempId = `pending-${Date.now()}`
+    setMessages((current) => [...current, { id: tempId, role: 'user', text: trimmed, createdAt: new Date().toISOString() }])
     setInput('')
     setIsLoading(true)
 
     try {
-      const history = messages
-        .filter((message) => message.id !== 'welcome')
-        .map((message) => ({ role: message.role, content: message.text }))
-      const answer = await callAiAssistant({ question: trimmed, language, topic: 'general programming', history })
-      setMessages((current) => [...current, { id: `${Date.now()}-ai`, role: 'assistant', text: answer }])
+      const result = await callAiAssistant({ question: trimmed, language, topic: 'general programming', history: toHistory(previous) })
+      setMessages((current) => [
+        ...current.map((m) => (m.id === tempId ? { ...m, id: result.questionId ?? tempId } : m)),
+        { id: result.answerId ?? `${Date.now()}-ai`, role: 'assistant', text: result.answer, createdAt: new Date().toISOString() },
+      ])
     } catch (err) {
-      const text = err instanceof Error ? err.message : t.generic.error
-      setError(text)
+      // The question was not answered (and not saved): take it back into the input field.
+      setMessages((current) => current.filter((m) => m.id !== tempId))
+      setInput(trimmed)
+      setError(err instanceof Error ? err.message : t.generic.error)
     } finally {
       setIsLoading(false)
+      inputRef.current?.focus()
     }
   }
 
-  const handleSubmit = async (event: React.FormEvent) => {
+  const regenerate = async (answerId: string) => {
+    if (isLoading || !isAiUnlocked) return
+    const index = messages.findIndex((m) => m.id === answerId)
+    const question = index > 0 ? messages[index - 1] : undefined
+    if (!question || question.role !== 'user') return
+
+    setError(null)
+    setIsLoading(true)
+    setRegeneratingId(answerId)
+    try {
+      const result = await callAiAssistant({ question: question.text, language, topic: 'general programming', history: toHistory(messages.slice(0, index - 1)), regenerate: true })
+      setMessages((current) => current.map((m) => {
+        if (m.id === answerId) return { id: result.answerId ?? `${Date.now()}-ai`, role: 'assistant', text: result.answer, createdAt: new Date().toISOString() }
+        if (m.id === question.id && result.questionId) return { ...m, id: result.questionId }
+        return m
+      }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.generic.error)
+    } finally {
+      setIsLoading(false)
+      setRegeneratingId(null)
+    }
+  }
+
+  const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault()
-    await sendQuestion(input)
+    void sendQuestion(input)
   }
 
   const handleInputKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey) return
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
     event.preventDefault()
-    if (!isLoading) {
-      void sendQuestion(input)
-    }
+    if (!isLoading) void sendQuestion(input)
   }
 
-  const resetChat = () => {
+  const clearChat = async () => {
+    setConfirmClear(false)
     setError(null)
-    setInput('')
-    setMessages([welcomeMessage])
+    try {
+      if (userEmail) await clearAiHistory()
+      setMessages([])
+      setInput('')
+      setQuestionsOpen(true)
+    } catch {
+      setError(t.generic.error)
+    }
   }
 
-  const historyItems = useMemo(
-    () => messages.filter((message) => message.role === 'user').slice(-6).reverse(),
-    [messages]
-  )
-
-  const formatTime = useCallback((id: string) => {
-    const stamp = Number(id.split('-')[0] || id)
-    if (!Number.isFinite(stamp)) {
-      return language === 'ru' ? 'только что' : language === 'kg' ? 'азыр' : 'just now'
+  const removeHistoryItem = async (id: string) => {
+    setError(null)
+    try {
+      if (!id.startsWith('pending-')) await deleteAiExchange(id)
+      setMessages((current) => {
+        const index = current.findIndex((m) => m.id === id)
+        if (index < 0) return current
+        const removeNext = current[index + 1]?.role === 'assistant' ? 1 : 0
+        return current.filter((_, n) => n < index || n > index + removeNext)
+      })
+    } catch {
+      setError(t.generic.error)
     }
-    return new Date(stamp).toLocaleTimeString(language === 'kg' ? 'ky-KG' : language === 'ru' ? 'ru-RU' : 'en-US', {
-      hour: '2-digit',
-      minute: '2-digit'
-    })
+  }
+
+  const historyItems = useMemo(() => messages.filter((m) => m.role === 'user' && !m.id.startsWith('pending-')).slice(-8).reverse(), [messages])
+
+  const formatTime = useCallback((message: ChatMessage) => {
+    const stamp = message.createdAt ? Date.parse(message.createdAt) : Number.NaN
+    if (!Number.isFinite(stamp)) return language === 'ru' ? 'только что' : language === 'kg' ? 'азыр' : 'just now'
+    const date = new Date(stamp)
+    const sameDay = date.toDateString() === new Date().toDateString()
+    return date.toLocaleString(LOCALES[language], sameDay ? { hour: '2-digit', minute: '2-digit' } : { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
   }, [language])
 
-  const removeHistoryItem = (id: string) => {
-    setMessages((current) => {
-      const filtered = current.filter((item) => item.id !== id)
-      return filtered.length > 0 ? filtered : [welcomeMessage]
-    })
-  }
-
   const userInitial = (userEmail?.trim()?.charAt(0) || 'U').toUpperCase()
+  const lastAssistantId = [...messages].reverse().find((m) => m.role === 'assistant')?.id
+  const shown: ChatMessage[] = [welcomeMessage, ...messages]
 
   if (!isAiUnlocked) {
     return (
@@ -154,6 +267,7 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
             <p>{t.ai.blocked}</p>
             <div className="ai-chat-access-pill"><Sparkles size={15} />{t.ai.accessLabel}</div>
           </div>
+          <KeyQuestions language={language} locked disabled pricingPath={pricingPath} onAsk={() => undefined} open onToggle={() => undefined} />
           <div className="ai-chat-locked-actions">
             <Link to={pricingPath} className="btn btn-primary">{t.ai.connectPlan}</Link>
           </div>
@@ -168,7 +282,7 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
         <Link className="ai-chat-brand" to="/dashboard">
           <img src={siteLogo} alt="LevelUp" className="ai-chat-brand-logo" />
         </Link>
-        <button type="button" className="ai-chat-new-btn" onClick={resetChat} disabled={isLoading}>
+        <button type="button" className="ai-chat-new-btn" onClick={() => (messages.length ? setConfirmClear(true) : setQuestionsOpen(true))} disabled={isLoading}>
           <MessageSquareText size={18} />
           <span>{t.ai.newChat}</span>
           <Plus size={16} />
@@ -188,10 +302,10 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
                   <MessageSquareText size={14} />
                   <div>
                     <strong>{message.text.slice(0, 38)}{message.text.length > 38 ? '…' : ''}</strong>
-                    <span>{formatTime(message.id)}</span>
+                    <span>{formatTime(message)}</span>
                   </div>
                 </div>
-                <button type="button" className="ai-chat-history-remove" onClick={() => removeHistoryItem(message.id)} aria-label="Delete chat message">
+                <button type="button" className="ai-chat-history-remove" onClick={() => { void removeHistoryItem(message.id) }} disabled={isLoading} aria-label={ui.deleteItem} title={ui.deleteItem}>
                   <Trash2 size={14} />
                 </button>
               </article>
@@ -211,39 +325,68 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
           <div className="ai-chat-access-pill"><Sparkles size={15} />{t.ai.accessLabel}</div>
         </div>
 
-        <div className="ai-chat-history">
-          {messages.map((message) => (
-            <AIMessage key={message.id} role={message.role} text={message.text} userLabel={userInitial} />
-          ))}
-          {messages.length <= 1 && !isLoading && (
-            <div className="ai-suggestions" aria-label={pick(language, 'Даяр суроолор', 'Готовые вопросы', 'Suggested questions')}>
-              {aiSuggestions[language].map((question) => (
-                <button key={question} type="button" className="ai-suggestion" onClick={() => { void sendQuestion(question) }}>
-                  <Lightbulb size={16} /> <span>{question}</span>
-                </button>
-              ))}
-            </div>
+        <KeyQuestions
+          language={language}
+          locked={false}
+          disabled={isLoading}
+          pricingPath={pricingPath}
+          onAsk={(text) => { void sendQuestion(text) }}
+          open={questionsOpen}
+          onToggle={() => setQuestionsOpen((v) => !v)}
+        />
+
+        <div className="ai-chat-toolbar">
+          <span>{t.ai.history}{messages.length > 0 ? ` · ${messages.filter((m) => m.role === 'user').length}` : ''}</span>
+          {confirmClear ? (
+            <span className="ai-chat-confirm" role="alert">
+              <span>{ui.clearConfirm}</span>
+              <button type="button" className="ai-msg-action danger" onClick={() => { void clearChat() }}>{ui.confirmDelete}</button>
+              <button type="button" className="ai-msg-action" onClick={() => setConfirmClear(false)}>{ui.cancel}</button>
+            </span>
+          ) : (
+            <button type="button" className="ai-msg-action" onClick={() => setConfirmClear(true)} disabled={isLoading || messages.length === 0}>
+              <Trash2 size={14} /><span>{ui.clearHistory}</span>
+            </button>
           )}
-          {isLoading && <AIMessage role="assistant" text={t.ai.generating} loading />}
-          <div ref={bottomRef} />
         </div>
 
-        {error && <div className="error-message ai-chat-error">{error}</div>}
+        <div className="ai-chat-history" ref={listRef} aria-live="polite">
+          {shown.map((message) => (
+            message.id === regeneratingId ? null : (
+              <AIMessage
+                key={message.id}
+                role={message.role}
+                text={message.text}
+                userLabel={userInitial}
+                copyLabel={message.id === 'welcome' ? undefined : ui.copy}
+                copiedLabel={ui.copied}
+                regenerateLabel={ui.regenerate}
+                onRegenerate={message.id === lastAssistantId && message.id !== 'welcome' ? () => { void regenerate(message.id) } : undefined}
+                busy={isLoading}
+              />
+            )
+          ))}
+          {isLoading && <AIMessage role="assistant" text={ui.thinking} loading />}
+        </div>
+
+        {(error || historyFailed) && <div className="error-message ai-chat-error" role="alert">{error ?? ui.historyError}</div>}
 
         <form className="ai-chat-form" onSubmit={handleSubmit}>
           <label htmlFor="ai-assistant-input" className="ai-chat-input-label">{t.ai.inputLabel}</label>
           <div className="ai-chat-input-shell">
-            <Paperclip size={18} />
+            <Sparkles size={18} />
             <textarea
               id="ai-assistant-input"
+              ref={inputRef}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleInputKeyDown}
               placeholder={t.ai.placeholder}
               rows={2}
+              maxLength={4000}
               disabled={isLoading}
             />
-            <button type="submit" className="ai-chat-send-btn" disabled={isLoading || !input.trim()} aria-label={t.buttons.send}>
+            <button type="submit" className="ai-chat-send-btn" disabled={isLoading || !input.trim()} aria-label={ui.send} title={ui.send}>
               <SendHorizonal size={18} />
             </button>
           </div>

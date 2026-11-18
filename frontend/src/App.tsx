@@ -15,7 +15,7 @@ import './components/AdminPanel.css'
 // The admin panel is large and only used by the administrator, so it is loaded on demand.
 const AdminPanel = lazy(() => import('./components/AdminPanel'))
 
-import { defaultNotificationSettings, defaultReviews, faqData, translations, getStoredValue, setStoredValue, getStoredLastAuthEmail, setStoredLastAuthEmail, resolveSafeNextPath, appendFromParam, fetchJson, formatCompactNumber, AnimatedMetric, SmartBackButton, isAdminRole, sanitizeReviews, buildReviewLessonOptions, createEmptyProgress, renderAvatarContent, buildLeaderboard, getCurrentUserProgress, LanguageContext, useLanguage, pick, levelLabel, normalizeLanguage, normalizeTheme, buildCourseCatalog, CourseCatalogContext, useCourseCatalog, bundledPlans, PLAN_RANK, GUEST_LESSON_LIMIT, BillingContext, useBilling, accessPlanOf, useLessonLimit, formatDateTime, subscriptionStatusText, paymentStatusText, historyEventText, UpgradeRequiredModal, mapApiCourse, hasActiveAiAccess, type Lang, type Theme, type UserProfile, type NotificationSettings, type UserProgress, type SiteStats, type LeaderboardEntry, type Review, type CourseCatalog, type ApiCourse, type PlanView, type BillingState } from './appShared'
+import { defaultNotificationSettings, defaultReviews, faqData, translations, getStoredValue, setStoredValue, getStoredLastAuthEmail, setStoredLastAuthEmail, resolveSafeNextPath, appendFromParam, fetchJson, formatCompactNumber, AnimatedMetric, SmartBackButton, isAdminRole, sanitizeReviews, buildReviewLessonOptions, createEmptyProgress, renderAvatarContent, buildLeaderboard, getCurrentUserProgress, LanguageContext, LanguageSetterContext, useLanguage, pick, levelLabel, normalizeLanguage, normalizeTheme, buildCourseCatalog, CourseCatalogContext, useCourseCatalog, bundledPlans, PLAN_RANK, GUEST_LESSON_LIMIT, BillingContext, useBilling, accessPlanOf, useLessonLimit, formatDateTime, subscriptionStatusText, paymentStatusText, historyEventText, UpgradeRequiredModal, mapApiCourse, hasActiveAiAccess, type Lang, type Theme, type UserProfile, type NotificationSettings, type UserProgress, type SiteStats, type LeaderboardEntry, type Review, type CourseCatalog, type ApiCourse, type PlanView, type BillingState } from './appShared'
 import HeroSection, { HeroIllustration } from './components/HeroSection'
 import Sidebar from './components/Sidebar'
 import Logo from './components/Logo'
@@ -553,6 +553,7 @@ function AppShell() {
 
   return (
     <LanguageContext.Provider value={language}>
+    <LanguageSetterContext.Provider value={setLanguage}>
     <CourseCatalogContext.Provider value={catalog}>
     <BillingContext.Provider value={billing}>
     <div className="app-shell">
@@ -621,6 +622,7 @@ function AppShell() {
     </div>
     </BillingContext.Provider>
     </CourseCatalogContext.Provider>
+    </LanguageSetterContext.Provider>
     </LanguageContext.Provider>
   )
 }

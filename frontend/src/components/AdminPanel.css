@@ -1002,3 +1002,13 @@
 .admin-table select { border-color: var(--border); background: var(--surface); }
 .admin-alert { color: #b42318; }
 :root[data-theme='dark'] .admin-alert { color: #ffd7d7; }
+
+/* ── Admin language switch (KG / RU / EN) ── */
+.admin-lang-switch { display: flex; align-items: center; }
+.admin-login-card { position: relative; }
+.admin-login-card > .admin-lang-switch { position: absolute; top: 14px; right: 14px; z-index: 5; }
+.admin-header-actions .admin-lang-switch .header-lang-trigger { min-height: 34px; }
+.admin-account-email { margin: 4px 0 8px; }
+@media (max-width: 520px) {
+  .admin-login-card > .admin-lang-switch { top: 10px; right: 10px; }
+}

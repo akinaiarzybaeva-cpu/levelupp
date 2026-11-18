@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertCircle, CheckCircle, Eye, EyeOff, Lock, ShieldCheck } from 'lucide-react'
 import { API_BASE_URL, fetchWithWakeRetry, isNetworkError } from '../api'
+import { AdminLanguageSwitch, useAdminT } from './adminI18n'
+import { useLanguage } from '../appShared'
 
 type AdminLoginProps = {
   isLoggedIn: boolean
@@ -26,6 +28,8 @@ function safeNextPath(value: string | null): string {
 }
 
 export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLoginProps) {
+  const t = useAdminT()
+  const language = useLanguage()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [mode, setMode] = useState<'login' | 'forgot'>('login')
@@ -46,8 +50,10 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
   const [submitting, setSubmitting] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(() =>
     searchParams.get('reason') === 'forbidden'
-      ? { kind: 'error', message: 'This account does not have administrator access. Sign in with the administrator account.' }
-      : null
+      ? { kind: 'error', message: "This account does not have administrator access. Sign in with the administrator account." }
+      : searchParams.get('reset') === 'success'
+        ? { kind: 'success', message: "Password changed successfully. Now sign in." }
+        : null
   )
 
   // Redirect if already logged in as admin
@@ -64,7 +70,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
     setNotice(null)
 
     if (!email.trim() || !password) {
-      setNotice({ kind: 'error', message: 'Enter your administrator email and password' })
+      setNotice({ kind: 'error', message: "Enter your administrator email and password" })
       return
     }
 
@@ -84,7 +90,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
       }
 
       if (!response.ok || !data.ok) {
-        setNotice({ kind: 'error', message: data.error ?? 'Invalid email or password' })
+        setNotice({ kind: 'error', message: data.error ?? t("Invalid email or password") })
         return
       }
 
@@ -94,12 +100,12 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
         if (data.token) {
           void fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', headers: { Authorization: `Bearer ${data.token}` } }).catch(() => undefined)
         }
-        setNotice({ kind: 'error', message: 'Access denied. This login is strictly for administrators.' })
+        setNotice({ kind: 'error', message: "Access denied. This login is strictly for administrators." })
         return
       }
 
       if (!data.token) {
-        setNotice({ kind: 'error', message: 'Authentication failed: No session token received.' })
+        setNotice({ kind: 'error', message: "Authentication failed: No session token received." })
         return
       }
 
@@ -126,8 +132,8 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
       navigate(next, { replace: true })
     } catch (err) {
       const message = isNetworkError(err)
-        ? 'The server is not responding right now (it may be starting up or updating). Please wait a minute and try again.'
-        : (err instanceof Error ? err.message : 'Login failed')
+        ? t("The server is not responding right now (it may be starting up or updating). Please wait a minute and try again.")
+        : (err instanceof Error ? err.message : t("Login failed"))
       setNotice({ kind: 'error', message })
     } finally {
       setSubmitting(false)
@@ -139,7 +145,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
     setNotice(null)
 
     if (!email.trim()) {
-      setNotice({ kind: 'error', message: 'Enter the administrator email address' })
+      setNotice({ kind: 'error', message: "Enter the administrator email address" })
       return
     }
 
@@ -148,16 +154,16 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
       await fetch(`${API_BASE}/api/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.trim().toLowerCase() })
+        body: JSON.stringify({ email: email.trim().toLowerCase(), language })
       })
 
       // Generic success message to protect against email enumeration
       setNotice({
         kind: 'success',
-        message: 'If this email belongs to the administrator, a password reset link has been sent. Check your inbox (or the server console if email is in local mode).'
+        message: "If this email belongs to the administrator, a password reset link has been sent. Check your inbox (or the server console if email is in local mode)."
       })
     } catch {
-      setNotice({ kind: 'success', message: 'Password reset request submitted. Check your inbox.' })
+      setNotice({ kind: 'success', message: "Password reset request submitted. Check your inbox." })
     } finally {
       setSubmitting(false)
     }
@@ -166,18 +172,19 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
   return (
     <div className="admin-login-shell">
       <div className="admin-login-card">
+        <AdminLanguageSwitch />
         <div className="admin-login-brand">
           <div className="admin-brand-mark large"><ShieldCheck size={24} /></div>
           <h1>LEVEL UP</h1>
-          <p>Administrator Access</p>
+          <p>{t("Administrator Access")}</p>
         </div>
 
         {mode === 'login' ? (
           <form className="admin-login-form" onSubmit={(e) => void handleLogin(e)}>
-            <h2>Admin Login</h2>
+            <h2>{t("Admin Login")}</h2>
 
             <label>
-              <span>Administrator Email</span>
+              <span>{t("Administrator Email")}</span>
               <input
                 type="email"
                 value={email}
@@ -189,7 +196,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
             </label>
 
             <label>
-              <span>Password</span>
+              <span>{t("Password")}</span>
               <div className="password-field">
                 <input
                   type={showPassword ? 'text' : 'password'}
@@ -198,7 +205,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
                   placeholder="••••••••"
                   autoComplete="current-password"
                 />
-                <button type="button" onClick={() => setShowPassword((v) => !v)} aria-label="Toggle password visibility">
+                <button type="button" onClick={() => setShowPassword((v) => !v)} aria-label={t("Toggle password visibility")}>
                   {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
               </div>
@@ -212,41 +219,41 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
                   onChange={(e) => setRememberMe(e.target.checked)}
                   style={{ width: 'auto', margin: 0 }}
                 />
-                <span>Remember me</span>
+                <span>{t("Remember me")}</span>
               </label>
 
               <button type="button" className="text-button" onClick={() => { setMode('forgot'); setNotice(null) }}>
-                Forgot Password?
+                {t("Forgot Password?")}
               </button>
             </div>
 
             {notice && (
               <div className={`admin-notice admin-notice-${notice.kind}`}>
                 {notice.kind === 'success' ? <CheckCircle size={14} /> : <AlertCircle size={14} />}
-                <span>{notice.message}</span>
+                <span>{t(notice.message)}</span>
               </div>
             )}
 
             <button type="submit" className="btn btn-primary full-width" disabled={submitting}>
               {submitting ? (
-                <>Signing in…</>
+                <>{t("Signing in…")}</>
               ) : (
-                <><Lock size={15} /> Sign in as Admin</>
+                <><Lock size={15} /> {t("Sign in as Admin")}</>
               )}
             </button>
 
             <div className="admin-login-footer">
-              <span>Regular student?</span>
-              <Link to="/auth">Go to student login</Link>
+              <span>{t("Regular student?")}</span>
+              <Link to="/auth">{t("Go to student login")}</Link>
             </div>
           </form>
         ) : (
           <form className="admin-login-form" onSubmit={(e) => void handleForgotPassword(e)}>
-            <h2>Reset Password</h2>
-            <p className="admin-login-subtitle">Enter the administrator email to receive a password reset link.</p>
+            <h2>{t("Reset Password")}</h2>
+            <p className="admin-login-subtitle">{t("Enter the administrator email to receive a password reset link.")}</p>
 
             <label>
-              <span>Administrator Email</span>
+              <span>{t("Administrator Email")}</span>
               <input
                 type="email"
                 value={email}
@@ -260,16 +267,16 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
             {notice && (
               <div className={`admin-notice admin-notice-${notice.kind}`}>
                 {notice.kind === 'success' ? <CheckCircle size={14} /> : <AlertCircle size={14} />}
-                <span>{notice.message}</span>
+                <span>{t(notice.message)}</span>
               </div>
             )}
 
             <button type="submit" className="btn btn-primary full-width" disabled={submitting}>
-              {submitting ? 'Sending Link…' : 'Send Reset Link'}
+              {submitting ? t("Sending Link…") : t("Send Reset Link")}
             </button>
 
             <button type="button" className="btn btn-secondary full-width" onClick={() => { setMode('login'); setNotice(null) }}>
-              Back to Login
+              {t("Back to Login")}
             </button>
           </form>
         )}

@@ -27,7 +27,7 @@ export default function ForgotPassword({ email, t, language, disabled, onBusyCha
       await fetchJson<{ ok: true }>(`${API_BASE_URL}/api/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: normalized })
+        body: JSON.stringify({ email: normalized, language })
       })
       onNotice(t.messages.resetLinkSent)
     } catch (error) {

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertCircle, CheckCircle, Eye, EyeOff, Lock } from 'lucide-react'
 import { API_BASE_URL } from '../api'
+import { AdminLanguageSwitch, useAdminT } from './adminI18n'
+import { useLanguage } from '../appShared'
 
 const API_BASE = API_BASE_URL
 
@@ -25,6 +27,8 @@ type ResetAudience = 'admin' | 'user'
  * /reset-password (regular users); only the texts and the login route differ.
  */
 export default function AdminResetPassword({ audience = 'admin' }: { audience?: ResetAudience }) {
+  const t = useAdminT()
+  const language = useLanguage()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const loginPath = audience === 'admin' ? '/admin/login' : '/auth?mode=login'
@@ -32,7 +36,7 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
   const tokenId = searchParams.get('id') ?? ''
   const hasLinkParams = Boolean(rawToken && tokenId)
   const [tokenValid, setTokenValid] = useState<boolean | null>(hasLinkParams ? null : false)
-  const [tokenError, setTokenError] = useState<string | null>(hasLinkParams ? null : 'Invalid reset link. The URL is missing required parameters.')
+  const [tokenError, setTokenError] = useState<string | null>(hasLinkParams ? null : t("Invalid reset link. The URL is missing required parameters."))
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [showNew, setShowNew] = useState(false)
@@ -50,13 +54,13 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
         const data = await response.json() as { valid?: boolean; error?: string; expiresAt?: string }
         if (!response.ok || !data.valid) {
           setTokenValid(false)
-          setTokenError(data.error ?? 'This reset link is invalid or has expired.')
+          setTokenError(data.error ?? t("This reset link is invalid or has expired."))
         } else {
           setTokenValid(true)
         }
       } catch {
         setTokenValid(false)
-        setTokenError('Could not verify the reset link. Check your connection.')
+        setTokenError(t("Could not verify the reset link. Check your connection."))
       }
     }
 
@@ -68,17 +72,17 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
     setNotice(null)
 
     if (!newPassword || !confirmPassword) {
-      setNotice({ kind: 'error', message: 'Enter and confirm your new password' })
+      setNotice({ kind: 'error', message: "Enter and confirm your new password" })
       return
     }
 
     if (newPassword.length < 8) {
-      setNotice({ kind: 'error', message: 'Password must be at least 8 characters' })
+      setNotice({ kind: 'error', message: "Password must be at least 8 characters" })
       return
     }
 
     if (newPassword !== confirmPassword) {
-      setNotice({ kind: 'error', message: 'Passwords do not match' })
+      setNotice({ kind: 'error', message: "Passwords do not match" })
       return
     }
 
@@ -91,26 +95,27 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
           token: rawToken,
           tokenId,
           newPassword,
-          confirmPassword
+          confirmPassword,
+          language
         })
       })
 
       const data = await response.json() as { ok?: boolean; error?: string; message?: string }
 
       if (!response.ok || !data.ok) {
-        setNotice({ kind: 'error', message: data.error ?? 'Password reset failed' })
+        setNotice({ kind: 'error', message: data.error ?? t("Password reset failed") })
         return
       }
 
       setDone(true)
-      setNotice({ kind: 'success', message: data.message ?? 'Password reset successfully!' })
+      setNotice({ kind: 'success', message: "Password changed successfully. Now sign in." })
 
       // Redirect to the login page after 3 seconds
       setTimeout(() => {
-        navigate(loginPath, { replace: true })
+        navigate(audience === 'admin' ? '/admin/login?reset=success' : loginPath, { replace: true })
       }, 3000)
     } catch (err) {
-      setNotice({ kind: 'error', message: err instanceof Error ? err.message : 'Request failed' })
+      setNotice({ kind: 'error', message: err instanceof Error ? err.message : t("Request failed") })
     } finally {
       setSubmitting(false)
     }
@@ -123,11 +128,12 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
     return (
       <div className="admin-login-shell">
         <div className="admin-login-card">
+          <AdminLanguageSwitch />
           <div className="admin-login-brand">
             <div className="admin-brand-mark large"><Lock size={24} /></div>
             <h1>LEVEL UP</h1>
           </div>
-          <div className="admin-loading-state">Verifying reset link…</div>
+          <div className="admin-loading-state">{t("Verifying reset link…")}</div>
         </div>
       </div>
     )
@@ -137,16 +143,17 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
     return (
       <div className="admin-login-shell">
         <div className="admin-login-card">
+          <AdminLanguageSwitch />
           <div className="admin-login-brand">
             <div className="admin-brand-mark large"><AlertCircle size={24} /></div>
             <h1>LEVEL UP</h1>
           </div>
           <div className="admin-notice admin-notice-error">
             <AlertCircle size={16} />
-            <span>{tokenError}</span>
+            <span>{t(tokenError ?? '')}</span>
           </div>
           <button type="button" className="btn btn-primary full-width" onClick={() => navigate(loginPath)}>
-            Back to Login
+            {t("Back to Login")}
           </button>
         </div>
       </div>
@@ -156,40 +163,41 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
   return (
     <div className="admin-login-shell">
       <div className="admin-login-card">
+        <AdminLanguageSwitch />
         <div className="admin-login-brand">
           <div className="admin-brand-mark large"><Lock size={24} /></div>
           <h1>LEVEL UP</h1>
-          <p>{audience === 'admin' ? 'Set New Admin Password' : 'Set New Password'}</p>
+          <p>{audience === 'admin' ? t("Set New Admin Password") : t("Set New Password")}</p>
         </div>
 
         {done ? (
           <div>
             <div className="admin-notice admin-notice-success">
               <CheckCircle size={16} />
-              <span>{notice?.message}</span>
+              <span>{t(notice?.message ?? '')}</span>
             </div>
-            <p className="admin-login-subtitle">Redirecting to login page…</p>
+            <p className="admin-login-subtitle">{t("Redirecting to login page…")}</p>
             <button type="button" className="btn btn-primary full-width" onClick={() => navigate(loginPath, { replace: true })}>
-              Go to Login Now
+              {t("Go to Login Now")}
             </button>
           </div>
         ) : (
           <form className="admin-login-form" onSubmit={(e) => void handleSubmit(e)}>
-            <h2>Reset Password</h2>
-            <p className="admin-login-subtitle">{audience === 'admin' ? 'Enter a strong new administrator password.' : 'Enter a strong new password for your account.'}</p>
+            <h2>{t("Reset Password")}</h2>
+            <p className="admin-login-subtitle">{audience === 'admin' ? t("Enter a strong new administrator password.") : t("Enter a strong new password for your account.")}</p>
 
             <label>
-              <span>New Password</span>
+              <span>{t("New Password")}</span>
               <div className="password-field">
                 <input
                   type={showNew ? 'text' : 'password'}
                   value={newPassword}
                   onChange={(e) => { setNewPassword(e.target.value); setNotice(null) }}
-                  placeholder="Min. 8 characters"
+                  placeholder={t("Min. 8 characters")}
                   autoComplete="new-password"
                   autoFocus
                 />
-                <button type="button" onClick={() => setShowNew((v) => !v)} aria-label="Toggle visibility">
+                <button type="button" onClick={() => setShowNew((v) => !v)} aria-label={t("Toggle visibility")}>
                   {showNew ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
               </div>
@@ -199,28 +207,28 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
                     className="password-strength-fill"
                     style={{ width: `${(strength.score / 5) * 100}%`, background: strength.color }}
                   />
-                  <span style={{ color: strength.color }}>{strength.label}</span>
+                  <span style={{ color: strength.color }}>{t(strength.label)}</span>
                 </div>
               )}
             </label>
 
             <label>
-              <span>Confirm New Password</span>
+              <span>{t("Confirm New Password")}</span>
               <div className="password-field">
                 <input
                   type={showConfirm ? 'text' : 'password'}
                   value={confirmPassword}
                   onChange={(e) => { setConfirmPassword(e.target.value); setNotice(null) }}
-                  placeholder="Repeat new password"
+                  placeholder={t("Repeat new password")}
                   autoComplete="new-password"
                 />
-                <button type="button" onClick={() => setShowConfirm((v) => !v)} aria-label="Toggle visibility">
+                <button type="button" onClick={() => setShowConfirm((v) => !v)} aria-label={t("Toggle visibility")}>
                   {showConfirm ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
               </div>
               {confirmPassword && (
                 <small style={{ color: passwordsMatch ? '#38a169' : '#e53e3e' }}>
-                  {passwordsMatch ? '✓ Passwords match' : '✗ Passwords do not match'}
+                  {passwordsMatch ? t("✓ Passwords match") : t("✗ Passwords do not match")}
                 </small>
               )}
             </label>
@@ -228,16 +236,16 @@ export default function AdminResetPassword({ audience = 'admin' }: { audience?: 
             {notice && (
               <div className={`admin-notice admin-notice-${notice.kind}`}>
                 {notice.kind === 'success' ? <CheckCircle size={14} /> : <AlertCircle size={14} />}
-                <span>{notice.message}</span>
+                <span>{t(notice.message)}</span>
               </div>
             )}
 
             <button type="submit" className="btn btn-primary full-width" disabled={submitting}>
-              {submitting ? 'Setting Password…' : 'Set New Password'}
+              {submitting ? t("Setting Password…") : t("Set New Password")}
             </button>
 
             <button type="button" className="btn btn-secondary full-width" onClick={() => navigate(loginPath)}>
-              Cancel
+              {t("Cancel")}
             </button>
           </form>
         )}

@@ -96,6 +96,7 @@ const smtp = net.createServer((socket) => {
         const subject = subjectRaw
           .replace(/\r?\n[ \t]/g, ' ')
           .replace(/=\?UTF-8\?Q\?([^?]*)\?=\s*/gi, (_m, q) => decodeQEncoded(q))
+          .replace(/=\?UTF-8\?B\?([^?]*)\?=\s*/gi, (_m, b) => Buffer.from(b, 'base64').toString('utf8'))
         mails.push({ to: envelopeTo.map((t) => t.toLowerCase()), subject: subject.trim(), body: decodeMime(raw) })
         socket.write('250 OK queued\r\n')
         continue
@@ -474,11 +475,11 @@ try {
   })
 
   await check('Reset e-mail is really delivered over SMTP with the link', async () => {
-    const mail = mailsTo(userA.email).find((m) => /password reset/i.test(m.subject))
-    return (mail && /\/reset-password\?token=[0-9a-f]{96}/.test(mail.body.replace(/&amp;/g, '&')) && /30/.test(mail.body)) || JSON.stringify(mails.map((m) => m.subject))
+    const mail = mailsTo(userA.email).find((m) => /восстановление пароля|password reset/i.test(m.subject))
+    return (mail && /\/reset-password\?token=[0-9a-f]{96}/.test(mail.body.replace(/&amp;/g, '&')) && /30/.test(mail.body) && /Создать новый пароль/.test(mail.body) && /\/email\/levelup-logo\.png/.test(mail.body) && /не запрашивали/.test(mail.body)) || JSON.stringify(mails.map((m) => m.subject))
   })
   await check('Confirmation e-mail is sent after a password reset', async () => {
-    const ok = await waitFor(() => mailsTo(userA.email).some((m) => /changed/i.test(m.subject)))
+    const ok = await waitFor(() => mailsTo(userA.email).some((m) => /пароль изменён|changed/i.test(m.subject)))
     return ok || JSON.stringify(mailsTo(userA.email).map((m) => m.subject))
   })
   await check('Expired reset link is rejected (verify + reset)', async () => {
@@ -548,7 +549,7 @@ try {
     return (change.status === 200 && old.status === 401 && fresh.status === 200) || `${change.status}/${old.status}/${fresh.status}`
   })
   await check('Admin password change sends a confirmation e-mail', async () =>
-    (await waitFor(() => mailsTo(ADMIN_EMAIL).some((m) => /changed/i.test(m.subject)))) || JSON.stringify(mailsTo(ADMIN_EMAIL).map((m) => m.subject)))
+    (await waitFor(() => mailsTo(ADMIN_EMAIL).some((m) => /пароль изменён|changed/i.test(m.subject)))) || JSON.stringify(mailsTo(ADMIN_EMAIL).map((m) => m.subject)))
   await check('Admin recovers access through the e-mailed reset link; sessions are revoked', async () => {
     const before = mailsTo(ADMIN_EMAIL).length
     await request('/api/auth/forgot-password', { method: 'POST', body: { email: ADMIN_EMAIL } })

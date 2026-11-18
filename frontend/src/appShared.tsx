@@ -490,6 +490,8 @@ export function getCurrentUserProgress(user: UserProfile | null) {
 // Components read the active language from React state (via context) so that every
 // page re-renders in the new language immediately when it is switched.
 export const LanguageContext = createContext<Lang>('ru')
+/** Lets deep components (admin panel, admin login) change the site language without prop drilling. */
+export const LanguageSetterContext = createContext<(language: Lang) => void>(() => {})
 
 export function useLanguage(): Lang {
   return useContext(LanguageContext)

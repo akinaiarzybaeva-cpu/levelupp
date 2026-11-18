@@ -108,7 +108,7 @@ const anthropic = http.createServer((req, res) => {
       if (aiMode === 'refusal') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ id: 'msg_r', type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: 'refusal', stop_details: { type: 'refusal', category: null, explanation: null }, usage: { input_tokens: 1, output_tokens: 0 } })); return }
       const question = body.messages.at(-1).content
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ id: 'msg_test', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: 'MOCK-CLAUDE answer to: ' + question }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } }))
+      res.end(JSON.stringify({ id: 'msg_test', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: (aiMode === 'v2' ? 'MOCK-CLAUDE v2 answer to: ' : 'MOCK-CLAUDE answer to: ') + question }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } }))
       return
     }
     res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: 'nope' } }))
@@ -329,6 +329,54 @@ try {
     aiMode = 'ok'
     const noLeak = !JSON.stringify([withHistory, limited, refused]).includes(AI_KEY)
     return (withHistory.status === 200 && msgs.length === 3 && msgs[0].role === 'user' && msgs.at(-1).content === 'And a constant?' && limited.status === 429 && limited.data.code === 'AI_RATE_LIMITED' && refused.status === 422 && refused.data.code === 'AI_REFUSED' && noLeak) || JSON.stringify({ h: withHistory.status, msgs, l: limited, r: refused })
+  })
+  // ── AI assistant: key questions, saved history, regenerate, clear ───────────
+  await check('AI history: answered questions are saved per user, failed calls are not', async () => {
+    const { status, data } = await request('/api/ai/history', { token })
+    const roles = (data.messages ?? []).map((m) => m.role).join(',')
+    const texts = (data.messages ?? []).map((m) => m.text)
+    const anon = await request('/api/ai/history')
+    return (status === 200 && roles === 'user,assistant,user,assistant' && texts[0] === 'What is a variable?' && texts[3] === 'MOCK-CLAUDE answer to: And a constant?' && anon.status === 401) || JSON.stringify({ status, roles, texts, anon: anon.status })
+  })
+  await check('All 15 key questions (KG / RU / EN) get a real AI answer in the chosen language', async () => {
+    const src = fs.readFileSync(path.join(repoRoot, 'frontend', 'src', 'components', 'aiKeyQuestions.ts'), 'utf8')
+    const list = src.slice(src.indexOf('export const AI_KEY_QUESTIONS'), src.indexOf('export const AI_UI'))
+    const unq = (v) => v.split("\\'").join("'")
+    const byLang = { kg: [], ru: [], en: [] }
+    for (const m of list.matchAll(/\b(kg|ru|en): '((?:[^'\\]|\\.)*)'/g)) byLang[m[1]].push(unq(m[2]))
+    const langName = { kg: 'Kyrgyz', ru: 'Russian', en: 'English' }
+    const bad = []
+    for (const lang of ['kg', 'ru', 'en']) {
+      if (byLang[lang].length !== 15) bad.push(lang + ' count ' + byLang[lang].length)
+      for (const q of byLang[lang]) {
+        const r = await request('/api/ai/chat', { method: 'POST', token, body: { question: q, language: lang, topic: 'general programming' } })
+        const sent = aiRequests.at(-1)
+        const sys = JSON.stringify(sent?.body.system ?? '')
+        if (r.status !== 200 || r.data.answer !== 'MOCK-CLAUDE answer to: ' + q || sent.body.messages.at(-1).content !== q || !sys.includes('Answer in ' + langName[lang]) || !r.data.answerId) bad.push(lang + ': ' + q + ' -> ' + r.status)
+      }
+    }
+    const kz = /[әғқұһі]/i.test(byLang.kg.join(' '))
+    return (bad.length === 0 && !kz) || JSON.stringify({ bad, kz })
+  })
+  await check('Regenerate replaces the last answer instead of adding a duplicate', async () => {
+    const before = (await request('/api/ai/history', { token })).data.messages
+    const lastQ = before.at(-2)
+    aiMode = 'v2'
+    const r = await request('/api/ai/chat', { method: 'POST', token, body: { question: lastQ.text, language: 'en', regenerate: true } })
+    aiMode = 'ok'
+    const after = (await request('/api/ai/history', { token })).data.messages
+    return (r.status === 200 && after.length === before.length && after.at(-1).text === 'MOCK-CLAUDE v2 answer to: ' + lastQ.text && after.at(-2).text === lastQ.text) || JSON.stringify({ s: r.status, b: before.length, a: after.length, last: after.at(-1) })
+  })
+  await check('Deleting one history item removes the question and its answer; clear history empties it', async () => {
+    const before = (await request('/api/ai/history', { token })).data.messages
+    const first = before[0]
+    const del = await request('/api/ai/history/' + first.id, { method: 'DELETE', token })
+    const mid = (await request('/api/ai/history', { token })).data.messages
+    const missing = await request('/api/ai/history/999999', { method: 'DELETE', token })
+    const anon = await request('/api/ai/history', { method: 'DELETE' })
+    const clear = await request('/api/ai/history', { method: 'DELETE', token })
+    const after = (await request('/api/ai/history', { token })).data.messages
+    return (del.status === 200 && mid.length === before.length - 2 && !mid.some((m) => m.id === first.id) && missing.status === 404 && anon.status === 401 && clear.status === 200 && after.length === 0) || JSON.stringify({ del: del.status, b: before.length, m: mid.length, missing: missing.status, anon: anon.status, after: after.length })
   })
   await check('A lower plan is not sold on top of AI PRO (409 PLAN_INCLUDED)', async () => {
     const { status, data } = await buy(token, 'pro')

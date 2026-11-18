@@ -7,7 +7,13 @@ type AiRequest = {
   language: Lang
   topic: string
   history?: Array<{ role: 'user' | 'assistant'; content: string }>
+  /** Replace the previously saved answer to the same question instead of adding a new pair. */
+  regenerate?: boolean
 }
+
+export type AiAnswer = { answer: string; questionId?: string; answerId?: string }
+
+export type SavedAiMessage = { id: string; role: 'user' | 'assistant'; text: string; createdAt?: string }
 
 export class AiServiceError extends Error {
   status: number
@@ -47,17 +53,17 @@ const AI_ERROR_TEXT: Record<string, Record<Lang, string>> = {
   },
 }
 
-export async function callAiAssistant({ question, language, topic, history = [] }: AiRequest): Promise<string> {
+export async function callAiAssistant({ question, language, topic, history = [], regenerate = false }: AiRequest): Promise<AiAnswer> {
   // Always go through our backend: it checks the session and the AI PRO subscription
   // and holds the API key. There is intentionally no direct-to-provider override.
   // Plain fetch: AI errors (502/503 from the provider) must not be auto-retried, every call is billed.
   const response = await fetch(`${API_BASE_URL}/api/ai/chat`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ question, language, topic, history: history.slice(-10) }),
+    body: JSON.stringify({ question, language, topic, history: history.slice(-10), regenerate }),
   })
 
-  const data = await response.json().catch(() => ({})) as { answer?: string; error?: string; code?: string }
+  const data = await response.json().catch(() => ({})) as { answer?: string; error?: string; code?: string; questionId?: string; answerId?: string }
 
   if (!response.ok) {
     const key = data.code && AI_ERROR_TEXT[data.code]
@@ -70,5 +76,23 @@ export async function callAiAssistant({ question, language, topic, history = [] 
     throw new AiServiceError(AI_ERROR_TEXT.GENERIC[language], 502, 'AI_EMPTY')
   }
 
-  return data.answer
+  return { answer: data.answer, questionId: data.questionId, answerId: data.answerId }
+}
+
+/** The signed-in user's saved conversation (server-side, survives logout and other devices). */
+export async function fetchAiHistory(): Promise<SavedAiMessage[]> {
+  const response = await fetch(`${API_BASE_URL}/api/ai/history`, { headers: withAuthHeaders() })
+  if (!response.ok) throw new AiServiceError('history', response.status)
+  const data = await response.json() as { messages?: SavedAiMessage[] }
+  return Array.isArray(data.messages) ? data.messages : []
+}
+
+export async function clearAiHistory(): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/ai/history`, { method: 'DELETE', headers: withAuthHeaders() })
+  if (!response.ok) throw new AiServiceError('history', response.status)
+}
+
+export async function deleteAiExchange(questionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/ai/history/${encodeURIComponent(questionId)}`, { method: 'DELETE', headers: withAuthHeaders() })
+  if (!response.ok && response.status !== 404) throw new AiServiceError('history', response.status)
 }
