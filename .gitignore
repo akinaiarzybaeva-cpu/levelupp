@@ -30,3 +30,7 @@ backend/*.sqlite
 *.sqlite-wal
 *.sqlite-shm
 backend/server-test-*.txt
+
+# Local Python virtualenv (not part of the Node project)
+venv/
+.vercel

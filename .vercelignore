@@ -1,0 +1,10 @@
+# Only the frontend is deployed to Vercel (the API runs on Render).
+venv
+scratch
+backend
+scripts
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+**/.env

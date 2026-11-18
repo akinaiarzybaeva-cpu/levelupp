@@ -112,6 +112,9 @@ export function initBilling(db) {
   // One bank reference can back only one purchase request.
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_orders_manual_reference
     ON payment_orders (payment_reference) WHERE payment_reference IS NOT NULL`)
+  // A demo checkout key can create only one order (no double activation).
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_orders_demo_key
+    ON payment_orders (provider_order_id) WHERE provider = 'demo'`)
   // At most one transfer awaiting review per user.
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_orders_one_manual_pending
     ON payment_orders (user_email) WHERE provider = 'manual' AND status = 'pending'`)

@@ -87,6 +87,7 @@ const KIND_LABEL = { new: 'New purchase', renewal: 'Renewal', upgrade: 'Upgrade'
 const LINE = '━━━━━━━━━━━━━━━━━━'
 
 export function formatPurchaseMessage(info) {
+  if (info.template === 'demo') return formatDemoPurchaseMessage(info)
   // Exact layout requested for admin notifications. Sent only after a verified payment,
   // an admin-approved manual transfer, or an explicit admin grant (paymentStatus says which).
   const lines = [
@@ -122,6 +123,62 @@ export function formatPurchaseMessage(info) {
   if (info.kind && info.kind !== 'new') lines.push(`• Type: ${esc(KIND_LABEL[info.kind] ?? info.kind)}`)
   lines.push('', LINE, '', '🚀 LevelUp — Online Education Platform')
   return lines.join('\n')
+}
+
+export function formatRegistrationMessage(info) {
+  return [
+    '🟢 <b>NEW USER — LEVELUP</b>',
+    '',
+    `👤 Аты-жөнү: ${esc(info.name)}`,
+    `📧 Email: ${esc(info.email)}`,
+    `🆔 User ID: ${esc(info.userId)}`,
+    `📅 Катталган күнү: ${esc(bishkekTime(info.registeredAt))}`,
+    '🌐 Платформа: LevelUp',
+    '✅ Статус: Жаңы колдонуучу катталды'
+  ].join('\n')
+}
+
+/**
+ * New-user notification: sent once per account (dedupe key = email + creation time, so a retried
+ * request never sends twice). Never throws — a Telegram problem must not break registration.
+ */
+export async function notifyRegistration(db, info) {
+  try {
+    const key = `registration:${info.email}:${info.registeredAt}`
+    const claimed = db.prepare("INSERT OR IGNORE INTO telegram_notifications (id, dedupe_key, kind, status, created_at) VALUES (?, ?, 'registration', 'sending', ?)").run(crypto.randomUUID(), key, new Date().toISOString())
+    if (claimed.changes === 0) return { duplicate: true }
+    const result = await sendTelegramMessage(formatRegistrationMessage(info))
+    const skipped = !result.ok && /not configured/i.test(result.error ?? '')
+    db.prepare('UPDATE telegram_notifications SET status = ?, error = ?, sent_at = ? WHERE dedupe_key = ?')
+      .run(result.ok ? 'sent' : skipped ? 'skipped' : 'failed', result.ok ? null : result.error, result.ok ? new Date().toISOString() : null, key)
+    if (!result.ok && !skipped) {
+      // eslint-disable-next-line no-console
+      console.warn('[TELEGRAM] registration notification failed:', result.error)
+    } else if (result.ok) {
+      // eslint-disable-next-line no-console
+      console.log(`[TELEGRAM] registration notification sent for user ${info.userId}`)
+    }
+    return result.ok ? { sent: true } : { failed: result.error }
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[TELEGRAM] registration notification error:', error instanceof Error ? error.message : error)
+    return { failed: 'internal error' }
+  }
+}
+
+/** Demo checkout notification (Russian). Never contains card number, CVV or expiry. */
+export function formatDemoPurchaseMessage(info) {
+  return [
+    '🟢 <b>НОВАЯ ПОКУПКА ТАРИФА LEVELUP</b>',
+    '',
+    `👤 Имя пользователя: ${esc(info.name)}`,
+    `📧 Email: ${esc(info.email)}`,
+    `📦 Тариф: ${esc(PLAN_LABEL[info.planId] ?? info.planId)}`,
+    `💰 Стоимость: ${esc(info.amount)} ${esc(info.currency === 'KGS' ? 'сом' : info.currency)}`,
+    `📅 Дата покупки: ${esc(bishkekTime(info.purchasedAt))}`,
+    '✅ Статус: Успешно активирован',
+    '💳 Тип оплаты: Demo Payment'
+  ].join('\n')
 }
 
 /**

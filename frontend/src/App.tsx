@@ -71,7 +71,7 @@ import { API_BASE_URL, AUTH_TOKEN_KEY, fetchWithWakeRetry, getStoredAuthToken, i
 import { courses as bundledCourses, toEmbedUrl, type Course } from './data'
 // Optimised 384px WebP of assets/лого.png (826 KB -> ~21 KB); displayed at <=170px wide.
 import siteLogo from './assets/logo.webp'
-import { ApiError, cancelServerSubscription, createPaymentOrder, getDemoPaymentConfig, getManualTransferConfig, getPaymentOrderStatus, submitDemoCardPayment, submitManualTransfer, type ManualTransferConfig, getPlans, getReviewsFromServer, getServerSubscription, getSubscriptionHistory, saveReviewToServer, type SubscriptionHistory } from './paymentApi'
+import { ApiError, cancelServerSubscription, createPaymentOrder, getManualTransferConfig, getPaymentOrderStatus, submitManualTransfer, type ManualTransferConfig, getPlans, getReviewsFromServer, getServerSubscription, getSubscriptionHistory, saveReviewToServer, type SubscriptionHistory } from './paymentApi'
 import {
   archiveExpiredPlans,
   canAccessAiAssistant,
@@ -86,6 +86,7 @@ import {
   type UserSubscription
 } from './subscriptionService'
 import AdminLogin from './components/AdminLogin'
+import DemoPaymentModal, { useDemoPaymentEnabled } from './components/DemoPaymentModal'
 import AdminResetPassword from './components/AdminResetPassword'
 import './components/AdminPanel.css'
 
@@ -3778,11 +3779,30 @@ const planIcons: Record<string, typeof BookOpen> = { free: BookOpen, pro: Rocket
  * guest → register / choose; current plan → renew; higher plan → upgrade; lower plan → included.
  */
 function PricingCard({ plan, t, language }: { plan: PlanView; t: (typeof translations)[Lang]; language: Lang }) {
-  const { subscription, isLoggedIn } = useBilling()
+  const { subscription, isLoggedIn, refreshSubscription } = useBilling()
   const Icon = planIcons[plan.id] ?? Sparkles
   const current = isLoggedIn ? accessPlanOf(subscription) : null
   const isCurrent = current === plan.id
   const checkoutPath = `/pricing/checkout/${plan.id}`
+  const demoEnabled = useDemoPaymentEnabled()
+  const [payOpen, setPayOpen] = useState(false)
+  // Logged-in users pay in the Demo Payment window; guests go through login first (ProtectedRoute).
+  const useModal = isLoggedIn && demoEnabled === true && plan.id !== 'free'
+  const openPayment = (event: React.MouseEvent) => {
+    if (!useModal) return
+    event.preventDefault()
+    setPayOpen(true)
+  }
+  const paymentModal = useModal && (plan.id === 'pro' || plan.id === 'aipro') ? (
+    <DemoPaymentModal
+      open={payOpen}
+      onClose={() => setPayOpen(false)}
+      plan={{ id: plan.id, name: plan.name, title: plan.label[language], price: plan.price, currency: plan.currency, durationDays: plan.durationDays }}
+      language={language}
+      onPaid={async () => { const fresh = await refreshSubscription(); return fresh ? accessPlanOf(fresh) : null }}
+      endsAtText={(iso) => formatDateTime(iso, language)}
+    />
+  ) : null
 
   let action: React.ReactNode
   if (plan.id === 'free') {
@@ -3790,7 +3810,12 @@ function PricingCard({ plan, t, language }: { plan: PlanView; t: (typeof transla
       ? <Link to="/auth?mode=register" className="btn btn-secondary full-width">{t.buttons.startFree} <ArrowRight size={16} /></Link>
       : <span className="btn btn-secondary full-width is-static" aria-disabled="true"><CheckCircle2 size={16} /> {isCurrent ? pick(language, 'Учурдагы тариф', 'Ваш текущий тариф', 'Your current plan') : pick(language, 'Тарифиңизге кирет', 'Входит в ваш тариф', 'Included in your plan')}</span>
   } else if (isCurrent) {
-    action = <Link to={checkoutPath} className="btn btn-primary full-width"><RefreshCw size={16} /> {pick(language, 'Узартуу', 'Продлить', 'Renew')}</Link>
+    action = (
+      <>
+        <span className="btn btn-primary full-width is-static plan-active-btn" aria-disabled="true"><CheckCircle2 size={16} /> {pick(language, 'Тариф активдүү', 'Тариф активен', 'Plan active')}</span>
+        <Link to={checkoutPath} className="text-link plan-renew-link" onClick={openPayment}><RefreshCw size={14} /> {pick(language, 'Узартуу', 'Продлить', 'Renew')}</Link>
+      </>
+    )
   } else if (current && PLAN_RANK[plan.id] < PLAN_RANK[current]) {
     action = <span className="btn btn-secondary full-width is-static" aria-disabled="true"><CheckCircle2 size={16} /> {pick(language, 'Тарифиңизге кирет', 'Входит в ваш тариф', 'Included in your plan')}</span>
   } else {
@@ -3798,7 +3823,7 @@ function PricingCard({ plan, t, language }: { plan: PlanView; t: (typeof transla
     const label = upgrading
       ? pick(language, `${plan.name} тарифине өтүү`, `Перейти на ${plan.name}`, `Upgrade to ${plan.name}`)
       : pick(language, 'Тарифти сатып алуу', 'Купить тариф', 'Buy plan')
-    action = <Link to={checkoutPath} className={plan.featured || plan.id === 'aipro' ? 'btn btn-primary full-width' : 'btn btn-secondary full-width'}>{label} <ArrowRight size={16} /></Link>
+    action = <Link to={checkoutPath} onClick={openPayment} className={plan.featured || plan.id === 'aipro' ? 'btn btn-primary full-width' : 'btn btn-secondary full-width'}>{label} <ArrowRight size={16} /></Link>
   }
 
   return (
@@ -3818,41 +3843,12 @@ function PricingCard({ plan, t, language }: { plan: PlanView; t: (typeof transla
         <p className="plan-current-until">{pick(language, 'Чейин активдүү', 'Активен до', 'Active until')} <strong>{formatDateTime(subscription.endsAt, language)}</strong></p>
       )}
       {action}
+      {paymentModal}
     </div>
   )
 }
 
-/** Card helpers for the demo checkout (validation happens in the browser; only the last 4 digits are sent). */
-function luhnValid(digits: string) {
-  let sum = 0
-  for (let i = 0; i < digits.length; i++) {
-    let d = Number(digits[digits.length - 1 - i])
-    if (i % 2 === 1) { d *= 2; if (d > 9) d -= 9 }
-    sum += d
-  }
-  return sum % 10 === 0
-}
-function formatCardNumber(value: string) {
-  return value.replace(/\D/g, '').slice(0, 19).replace(/(\d{4})(?=\d)/g, '$1 ')
-}
-function formatExpiry(value: string) {
-  const digits = value.replace(/\D/g, '').slice(0, 4)
-  return digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits
-}
-function expiryValid(value: string) {
-  const match = /^(0[1-9]|1[0-2])\/(\d{2})$/.exec(value)
-  if (!match) return false
-  const now = new Date()
-  return Number(`20${match[2]}`) * 12 + Number(match[1]) >= now.getFullYear() * 12 + now.getMonth() + 1
-}
-function cardBrandOf(digits: string) {
-  if (digits.startsWith('4')) return 'Visa'
-  if (/^(5[1-5]|2[2-7])/.test(digits)) return 'Mastercard'
-  if (digits.startsWith('9417')) return 'Elcart'
-  return 'Card'
-}
-
-type CheckoutPhase ='review' | 'creating' | 'redirecting' | 'checking' | 'pending' | 'paid' | 'failed' | 'cancelled'
+type CheckoutPhase = 'review' | 'creating' | 'redirecting' | 'checking' | 'pending' | 'paid' | 'failed' | 'cancelled'
 
 function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserProfile | null }) {
   const { planId } = useParams()
@@ -3869,12 +3865,11 @@ function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserP
   const [orderId, setOrderId] = useState<string | null>(() => searchParams.get('orderId'))
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef(0)
-  // Purchase form. Demo card checkout: the card number is validated here and only its last 4 digits
-  // (+ expiry) are sent to the server; CVV is not asked. A bank transfer needs only payer name + reference.
+  // Purchase form. Card = Demo Payment window (card data stays in the browser, nothing is charged).
+  // A bank transfer needs only payer name + reference.
   const [payMode, setPayMode] = useState<'card' | 'online' | 'bank'>('card')
-  const [demoEnabled, setDemoEnabled] = useState<boolean | null>(null)
-  const [cardNumber, setCardNumber] = useState('')
-  const [cardExpiry, setCardExpiry] = useState('')
+  const demoEnabled = useDemoPaymentEnabled()
+  const [demoOpen, setDemoOpen] = useState(false)
   const [fullName, setFullName] = useState(user?.name ?? '')
   const [payerName, setPayerName] = useState('')
   const [paymentReference, setPaymentReference] = useState('')
@@ -3887,13 +3882,9 @@ function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserP
   useEffect(() => {
     let active = true
     getManualTransferConfig().then((cfg) => { if (active) setManualConfig(cfg) }).catch(() => { if (active) setManualConfig({ enabled: false }) })
-    getDemoPaymentConfig().then((cfg) => {
-      if (!active) return
-      setDemoEnabled(cfg.enabled)
-      if (!cfg.enabled) setPayMode('online')
-    }).catch(() => { if (active) { setDemoEnabled(false); setPayMode('online') } })
     return () => { active = false }
   }, [])
+  const effectivePayMode = payMode === 'card' && demoEnabled === false ? 'online' : payMode
 
   const current = accessPlanOf(subscription)
   const kind: 'new' | 'renewal' | 'upgrade' | 'included' = !plan || plan.id === 'free'
@@ -3973,14 +3964,7 @@ function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserP
     const required = pick(language, 'Милдеттүү талаа', 'Обязательное поле', 'Required field')
     if (fullName.trim().length < 2) errors.fullName = required
     if (!user?.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.email)) errors.email = pick(language, 'Email туура эмес', 'Неверный email', 'Invalid email')
-    if (payMode === 'card') {
-      const digits = cardNumber.replace(/\D/g, '')
-      if (!digits) errors.cardNumber = required
-      else if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) errors.cardNumber = pick(language, 'Карта номери туура эмес', 'Неверный номер карты', 'Invalid card number')
-      if (!cardExpiry) errors.expiry = required
-      else if (!expiryValid(cardExpiry)) errors.expiry = pick(language, 'Мөөнөтү туура эмес же өтүп кеткен (АА/ЖЖ)', 'Неверный или истёкший срок (ММ/ГГ)', 'Invalid or expired date (MM/YY)')
-    }
-    if (payMode === 'bank') {
+    if (effectivePayMode === 'bank') {
       if (payerName.trim().length < 2) errors.payerName = required
       if (!paymentReference.trim()) errors.paymentReference = required
       else if (!/^[A-Za-z0-9][A-Za-z0-9\-_/.# ]{3,63}$/.test(paymentReference.trim())) errors.paymentReference = pick(language, '4–64 белги: тамгалар, сандар, «-»', '4–64 символа: буквы, цифры, «-»', '4–64 characters: letters, digits, "-"')
@@ -3995,23 +3979,19 @@ function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserP
     event?.preventDefault()
     if (!user || !plan || kind === 'included') return
     setError(null)
+    // Card payment happens in the Demo Payment window (it validates its own fields).
+    if (effectivePayMode === 'card') {
+      setFieldErrors({})
+      setDemoOpen(true)
+      return
+    }
     if (!validateForm()) {
       setError(pick(language, 'Маалымат толук эмес — белгиленген талааларды текшериңиз.', 'Не хватает данных — проверьте отмеченные поля.', 'Some information is missing — check the highlighted fields.'))
       return
     }
     setPhase('creating')
     try {
-      if (payMode === 'card') {
-        const digits = cardNumber.replace(/\D/g, '')
-        await submitDemoCardPayment({ planId: plan.id, fullName: fullName.trim(), email: user.email, cardLast4: digits.slice(-4), cardBrand: cardBrandOf(digits), expiry: cardExpiry })
-        // The full number is not kept anywhere once the payment is done.
-        setCardNumber('')
-        setCardExpiry('')
-        await refreshSubscription()
-        setPhase('paid')
-        return
-      }
-      if (payMode === 'bank') {
+      if (effectivePayMode === 'bank') {
         const created = await submitManualTransfer({ planId: plan.id, fullName: fullName.trim(), email: user.email, payerName: payerName.trim(), paymentReference: paymentReference.trim(), receiptNote: receiptNote.trim() || undefined })
         setOrderProvider('manual')
         setOrderId(created.orderId)
@@ -4128,16 +4108,16 @@ function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserP
               <h2>{pick(language, 'Төлөм ыкмасы', 'Способ оплаты', 'Payment method')}</h2>
               <div className="payment-mode-switch" role="radiogroup" aria-label={pick(language, 'Төлөм түрү', 'Тип оплаты', 'Payment type')}>
                 {demoEnabled ? (
-                  <button type="button" role="radio" aria-checked={payMode === 'card'} className={payMode === 'card' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('card')} disabled={kind === 'included'}>
+                  <button type="button" role="radio" aria-checked={effectivePayMode === 'card'} className={effectivePayMode === 'card' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('card')} disabled={kind === 'included'}>
                     <CreditCard size={20} /><span>{pick(language, 'Банк картасы', 'Банковская карта', 'Bank card')}</span>
                   </button>
                 ) : (
-                  <button type="button" role="radio" aria-checked={payMode === 'online'} className={payMode === 'online' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('online')} disabled={kind === 'included'}>
+                  <button type="button" role="radio" aria-checked={effectivePayMode === 'online'} className={effectivePayMode === 'online' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('online')} disabled={kind === 'included'}>
                     <WalletCards size={20} /><span>{pick(language, 'Онлайн-төлөм', 'Онлайн-оплата', 'Online payment')}</span>
                   </button>
                 )}
                 {manualConfig?.enabled && (
-                  <button type="button" role="radio" aria-checked={payMode === 'bank'} className={payMode === 'bank' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('bank')} disabled={kind === 'included'}>
+                  <button type="button" role="radio" aria-checked={effectivePayMode === 'bank'} className={effectivePayMode === 'bank' ? 'payment-method active' : 'payment-method'} onClick={() => setPayMode('bank')} disabled={kind === 'included'}>
                     <Building2 size={20} /><span>{pick(language, 'Банктык которуу', 'Банковский перевод', 'Bank transfer')}</span>
                   </button>
                 )}
@@ -4151,23 +4131,21 @@ function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserP
                   <button type="button" className="text-button" onClick={() => setOrderId(pendingForThisPlan.orderId)}>{pick(language, 'Статусту текшерүү', 'Проверить статус', 'Check status')}</button>
                 </div>
               )}
-              {payMode === 'card' ? (
+              {effectivePayMode === 'card' ? (
                 <>
-                  <div className="checkout-fields">
-                    <label className={fieldErrors.cardNumber ? 'checkout-field wide has-error' : 'checkout-field wide'}>
-                      <span>{pick(language, 'Карта номери', 'Номер карты', 'Card number')} *</span>
-                      <input type="text" inputMode="numeric" autoComplete="cc-number" placeholder="0000 0000 0000 0000" maxLength={23} value={cardNumber} onChange={(event) => setCardNumber(formatCardNumber(event.target.value))} aria-invalid={!!fieldErrors.cardNumber} />
-                      {fieldErrors.cardNumber && <small className="field-error">{fieldErrors.cardNumber}</small>}
-                    </label>
-                    <label className={fieldErrors.expiry ? 'checkout-field has-error' : 'checkout-field'}>
-                      <span>{pick(language, 'Жарактуулук мөөнөтү', 'Срок действия', 'Expiry date')} *</span>
-                      <input type="text" inputMode="numeric" autoComplete="cc-exp" placeholder={pick(language, 'АА/ЖЖ', 'ММ/ГГ', 'MM/YY')} maxLength={5} value={cardExpiry} onChange={(event) => setCardExpiry(formatExpiry(event.target.value))} aria-invalid={!!fieldErrors.expiry} />
-                      {fieldErrors.expiry && <small className="field-error">{fieldErrors.expiry}</small>}
-                    </label>
-                  </div>
-                  <p className="checkout-demo-note">{pick(language, 'Демо-төлөм: акча алынбайт, тариф дароо активдешет.', 'Демо-оплата: деньги не списываются, тариф активируется сразу.', 'Demo payment: no money is charged, the plan activates immediately.')}</p>
+                  <p className="checkout-demo-note">{pick(language, 'Демо-төлөм: «Төлөө» баскычы карта формасын ачат. Акча алынбайт, тариф дароо активдешет.', 'Демо-оплата: кнопка «Оплатить» откроет форму карты. Деньги не списываются, тариф активируется сразу.', 'Demo payment: "Pay" opens the card form. No money is charged; the plan activates immediately.')}</p>
+                  {(plan.id === 'pro' || plan.id === 'aipro') && (
+                    <DemoPaymentModal
+                      open={demoOpen}
+                      onClose={(paid) => { setDemoOpen(false); if (paid) setPhase('paid') }}
+                      plan={{ id: plan.id, name: plan.name, title: plan.label[language], price: plan.price, currency: plan.currency, durationDays: plan.durationDays }}
+                      language={language}
+                      onPaid={async () => { const fresh = await refreshSubscription(); return fresh ? accessPlanOf(fresh) : null }}
+                      endsAtText={(iso) => formatDateTime(iso, language)}
+                    />
+                  )}
                 </>
-              ) : payMode === 'online' ? (
+              ) : effectivePayMode === 'online' ? (
                 <>
                   <p className="checkout-subtitle">{pick(language, 'Төлөм системасын тандаңыз', 'Выберите платёжную систему', 'Choose a payment provider')}</p>
                   <div className="payment-methods" role="radiogroup" aria-label={pick(language, 'Төлөм системасы', 'Платёжная система', 'Payment provider')}>
@@ -4206,17 +4184,17 @@ function CheckoutPage({ t, user }: { t: (typeof translations)[Lang]; user: UserP
                   </div>
                 </>
               )}
-              <label className={fieldErrors.confirm ? 'checkout-confirm has-error' : 'checkout-confirm'}>
+              {effectivePayMode !== 'card' && <label className={fieldErrors.confirm ? 'checkout-confirm has-error' : 'checkout-confirm'}>
                 <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={kind === 'included'} />
                 <span>{pick(language, `${plan.name} тарифин ${plan.price} ${currency} суммасына сатып алууну ырастайм.`, `Подтверждаю покупку тарифа ${plan.name} на сумму ${plan.price} ${currency}.`, `I confirm the purchase of ${plan.name} for ${plan.price} ${currency}.`)}</span>
-              </label>
+              </label>}
               <Button type="submit" block size="lg" icon={ShieldCheck} disabled={kind === 'included' || phase === 'creating' || phase === 'redirecting'}>
-                {phase === 'creating' ? pick(language, 'Жөнөтүлүүдө...', 'Отправляем...', 'Sending...') : phase === 'redirecting' ? pick(language, 'Төлөм барагына өтүүдө...', 'Переходим к оплате...', 'Redirecting to payment...') : `${payMode === 'card' ? pick(language, 'Төлөө', 'Оплатить', 'Pay') : pick(language, 'Жөнөтүү', 'Отправить', 'Submit')} — ${plan.price} ${currency}`}
+                {phase === 'creating' ? pick(language, 'Жөнөтүлүүдө...', 'Отправляем...', 'Sending...') : phase === 'redirecting' ? pick(language, 'Төлөм барагына өтүүдө...', 'Переходим к оплате...', 'Redirecting to payment...') : `${effectivePayMode === 'card' ? pick(language, 'Төлөө', 'Оплатить', 'Pay') : pick(language, 'Жөнөтүү', 'Отправить', 'Submit')} — ${plan.price} ${currency}`}
               </Button>
               {error && <p className="error-message" role="alert">{error}</p>}
-              <p className="checkout-secure"><Lock size={14} /> {payMode === 'card'
-                ? pick(language, 'Карта номери сакталбайт жана серверге жөнөтүлбөйт — акыркы 4 сан гана колдонулат. CVV суралбайт.', 'Номер карты не сохраняется и не отправляется на сервер — используются только последние 4 цифры. CVV не запрашивается.', 'The card number is not stored or sent to the server — only the last 4 digits are used. CVV is not requested.')
-                : payMode === 'bank'
+              <p className="checkout-secure"><Lock size={14} /> {effectivePayMode === 'card'
+                ? pick(language, 'Карта маалыматтары (номери, мөөнөтү, CVV) серверге жөнөтүлбөйт жана сакталбайт.', 'Данные карты (номер, срок, CVV) не отправляются на сервер и не сохраняются.', 'Card details (number, expiry, CVV) are not sent to the server or stored.')
+                : effectivePayMode === 'bank'
                 ? pick(language, 'Карта номерин, CVV же мөөнөтүн эч качан жазбаңыз. Тариф администратор которууну ырастагандан кийин гана активдешет.', 'Никогда не вводите номер карты, CVV или срок действия. Тариф активируется только после того, как администратор подтвердит перевод.', 'Never enter a card number, CVV or expiry date. The plan activates only after the administrator confirms the transfer.')
                 : pick(language, 'Төлөм төлөм системасынын барагында өтөт. LevelUp карта маалыматтарын сактабайт.', 'Оплата проходит на странице платёжной системы. LevelUp не хранит данные карт.', 'Payment happens on the payment system’s page. LevelUp does not store card details.')}</p>
               <Link to={fallbackPath} className="text-link">{t.sections.choosePlanShort}</Link>

@@ -436,8 +436,39 @@ try {
     // The order is already activated, so the callback is acknowledged without re-activation; no message is re-sent from that path.
     return purchaseMessages().length === before || `${purchaseMessages().length} vs ${before}`
   })
-  await check('Registration notification still uses the same bot and admin chat', async () =>
-    registrationMessages >= 1 && telegramMessages[0].chat_id === ADMIN_CHAT && telegramMessages[0].text.includes('New LevelUp registration'))
+  await check('Registration notification: same bot and admin chat, exact "NEW USER — LEVELUP" format', async () => {
+    const text = telegramMessages[0]?.text ?? ''
+    const ok = registrationMessages === 1 && telegramMessages[0].chat_id === ADMIN_CHAT && text.startsWith('🟢 <b>NEW USER — LEVELUP</b>') &&
+      text.includes('👤 Аты-жөнү: Aigerim Test') && text.includes(`📧 Email: ${student.email}`) && /🆔 User ID: #\d+/.test(text) &&
+      text.includes('📅 Катталган күнү: ') && text.includes('🌐 Платформа: LevelUp') && text.includes('✅ Статус: Жаңы колдонуучу катталды') && !text.includes(BOT_TOKEN)
+    return ok || JSON.stringify({ registrationMessages, text })
+  })
+  await check('Registration: user saved in the DB, exactly one message; login and failed re-registration send none', async () => {
+    const regUser = { name: 'Nurlan Kadyrov', email: 'reg.notify@example.test', password: 'RegNotify#Pass1' }
+    const isReg = (m) => m.text.includes('NEW USER — LEVELUP') && m.text.includes(regUser.email)
+    const r = await request('/api/auth/register', { method: 'POST', body: regUser })
+    await waitFor(() => telegramMessages.some(isReg), 3000)
+    const dbh = await sqlite()
+    const saved = dbh.prepare('SELECT user_email FROM user_profiles WHERE user_email = ?').get(regUser.email)
+    dbh.close()
+    const again = await request('/api/auth/register', { method: 'POST', body: regUser })
+    const login1 = await request('/api/auth/login', { method: 'POST', body: { email: regUser.email, password: regUser.password } })
+    const login2 = await request('/api/auth/login', { method: 'POST', body: { email: regUser.email, password: regUser.password } })
+    await sleep(500)
+    const count = telegramMessages.filter(isReg).length
+    return (r.status === 201 && saved && again.status === 409 && login1.status === 200 && login2.status === 200 && count === 1) || JSON.stringify({ r: r.status, saved: !!saved, again: again.status, l1: login1.status, l2: login2.status, count })
+  })
+  await check('Registration: Telegram outage does not break sign-up; the error is logged without the token', async () => {
+    telegramMode = 'fail'
+    const regUser = { name: 'Outage User', email: 'reg.outage@example.test', password: 'RegOutage#Pass1' }
+    const r = await request('/api/auth/register', { method: 'POST', body: regUser })
+    await sleep(2800)
+    telegramMode = 'ok'
+    const dbh = await sqlite()
+    const row = dbh.prepare("SELECT status, error FROM telegram_notifications WHERE dedupe_key LIKE ?").get(`registration:${regUser.email}:%`)
+    dbh.close()
+    return (r.status === 201 && r.data.token && row?.status === 'failed' && !String(row.error).includes(BOT_TOKEN) && serverLog.includes('[TELEGRAM] registration notification failed')) || JSON.stringify({ r: r.status, row })
+  })
   await check('Provider outage while creating an order → clean 502, nothing stored as paid', async () => {
     providerMode = 'fail'
     const r = await buy(token, 'aipro', 'MBank')
@@ -540,37 +571,60 @@ try {
     return (!cols.some((c) => /card|cvv|expiry|pan/i.test(c)) && payments === 1) || JSON.stringify({ cols, payments })
   })
 
-  // ── Demo card checkout (no real charge) ─────────────────────────────────────
+  // ── Demo Payment (no real charge) ───────────────────────────────────────────
   const cardUser = { name: 'Card Demo', email: 'card.demo@example.test', password: 'CardDemo#Pass12' }
   const cardToken = (await request('/api/auth/register', { method: 'POST', body: cardUser })).data.token
-  const FULL_CARD = '4111111111111111'
-  await check('Demo card checkout: guest refused (401), expired card and missing fields rejected', async () => {
-    const guest = await request('/api/payments/demo', { method: 'POST', body: { planId: 'aipro' } })
-    const expired = await request('/api/payments/demo', { method: 'POST', token: cardToken, body: { planId: 'aipro', fullName: 'Card Demo', email: cardUser.email, cardLast4: '1111', cardBrand: 'Visa', expiry: '01/20' } })
-    const missing = await request('/api/payments/demo', { method: 'POST', token: cardToken, body: { planId: 'aipro', fullName: '', email: cardUser.email, cardLast4: '', expiry: '' } })
-    return (guest.status === 401 && expired.data.code === 'INVALID_EXPIRY' && missing.data.code === 'MISSING_FIELDS') || JSON.stringify([guest.status, expired.data, missing.data])
+  // A careless client might still send card data: the server must ignore it completely.
+  const LEAK = { cardNumber: '4111111111111111', cvv: '987', expiry: '12/30' }
+  const demoKey = crypto.randomUUID()
+  await check('Demo Payment: guest refused (401), missing cardholder name / checkout key rejected (400)', async () => {
+    const guest = await request('/api/payments/demo', { method: 'POST', body: { planId: 'aipro', cardholderName: 'A B', checkoutKey: crypto.randomUUID() } })
+    const noName = await request('/api/payments/demo', { method: 'POST', token: cardToken, body: { planId: 'aipro', cardholderName: '', checkoutKey: crypto.randomUUID() } })
+    const noKey = await request('/api/payments/demo', { method: 'POST', token: cardToken, body: { planId: 'aipro', cardholderName: 'CARD DEMO' } })
+    return (guest.status === 401 && noName.data.code === 'MISSING_FIELDS' && noKey.data.code === 'MISSING_FIELDS') || JSON.stringify([guest.status, noName.data, noKey.data])
   })
-  await check('Demo card checkout: "Pay" activates the plan at once and sends one Telegram message with a masked card', async () => {
+  await check('Demo Payment: "Pay" activates AI PRO at once, AI unlocked, Telegram message in the required Russian format', async () => {
     const before = purchaseMessages().length
-    const r = await request('/api/payments/demo', { method: 'POST', token: cardToken, body: { planId: 'aipro', fullName: 'Card Demo User', email: cardUser.email, cardLast4: FULL_CARD.slice(-4), cardBrand: 'Visa', expiry: '12/30' } })
+    const beforeAll = telegramMessages.length
+    const r = await request('/api/payments/demo', { method: 'POST', token: cardToken, body: { planId: 'aipro', cardholderName: 'CARD DEMO', checkoutKey: demoKey, ...LEAK } })
     const sub = (await request(`/api/subscription/${cardUser.email}`, { token: cardToken })).data
     const ai = await request('/api/ai/chat', { method: 'POST', token: cardToken, body: { question: 'hi' } })
-    await waitFor(() => purchaseMessages().length > before)
-    const text = purchaseMessages().at(-1)?.text ?? ''
-    const ok = r.status === 201 && r.data.status === 'paid' && sub.accessPlan === 'aipro' && ai.status === 200 &&
-      purchaseMessages().length === before + 1 && text.includes('• Full name: Card Demo User') && text.includes('Visa •••• 1111') && text.includes('PAID (demo') && !text.includes(FULL_CARD)
-    return ok || JSON.stringify({ r: r.data, plan: sub.accessPlan, ai: ai.status, text })
+    await waitFor(() => telegramMessages.length > beforeAll)
+    const text = telegramMessages.at(-1)?.text ?? ''
+    const fmt = text.startsWith('🟢 <b>НОВАЯ ПОКУПКА ТАРИФА LEVELUP</b>') && text.includes('👤 Имя пользователя: Card Demo') && text.includes(`📧 Email: ${cardUser.email}`) &&
+      text.includes('📦 Тариф: AI PRO') && text.includes('💰 Стоимость: 799 сом') && text.includes('📅 Дата покупки: ') && text.includes('✅ Статус: Успешно активирован') && text.includes('💳 Тип оплаты: Demo Payment')
+    const noSecrets = !text.includes(LEAK.cardNumber) && !text.includes(LEAK.cvv) && !text.includes(LEAK.expiry)
+    return (r.status === 201 && r.data.status === 'paid' && r.data.accessPlan === 'aipro' && sub.accessPlan === 'aipro' && ai.status === 200 && telegramMessages.length === beforeAll + 1 && purchaseMessages().length === before && fmt && noSecrets) || JSON.stringify({ r: r.data, plan: sub.accessPlan, ai: ai.status, text })
   })
-  await check('Demo card checkout: double click within seconds is refused (409), no second activation', async () => {
-    const r = await request('/api/payments/demo', { method: 'POST', token: cardToken, body: { planId: 'aipro', fullName: 'Card Demo User', email: cardUser.email, cardLast4: '1111', cardBrand: 'Visa', expiry: '12/30' } })
+  await check('Demo Payment: the same checkout sent again (double click / retry) does not activate twice or re-notify', async () => {
+    const endsBefore = (await request(`/api/subscription/${cardUser.email}`, { token: cardToken })).data.endsAt
+    const count = telegramMessages.length
+    const replies = await Promise.all([1, 2, 3].map(() => request('/api/payments/demo', { method: 'POST', token: cardToken, body: { planId: 'aipro', cardholderName: 'CARD DEMO', checkoutKey: demoKey } })))
+    await sleep(300)
+    const endsAfter = (await request(`/api/subscription/${cardUser.email}`, { token: cardToken })).data.endsAt
+    const dbh = await sqlite()
+    const orders = dbh.prepare("SELECT COUNT(*) AS c FROM payment_orders WHERE provider = 'demo' AND provider_order_id = ?").get(demoKey).c
+    dbh.close()
+    return (replies.every((x) => x.status === 200 && x.data.alreadyProcessed) && endsAfter === endsBefore && orders === 1 && telegramMessages.length === count) || JSON.stringify({ replies: replies.map((x) => x.status), endsBefore, endsAfter, orders })
+  })
+  await check('Demo Payment: another user cannot reuse someone else\'s checkout key', async () => {
+    const r = await request('/api/payments/demo', { method: 'POST', token: buyerToken, body: { planId: 'aipro', cardholderName: 'OTHER USER', checkoutKey: demoKey } })
     return (r.status === 409 && r.data.code === 'DUPLICATE_SUBMIT') || JSON.stringify(r)
   })
-  await check('Demo card checkout: the full card number is not stored anywhere in the database', async () => {
+  await check('Demo Payment: no card number, CVV or expiry anywhere in the database', async () => {
     const dbh = await sqlite()
-    const dump = JSON.stringify([dbh.prepare('SELECT * FROM payment_orders').all(), dbh.prepare('SELECT * FROM payments').all(), dbh.prepare('SELECT * FROM subscription_history').all()])
+    const dump = JSON.stringify([dbh.prepare('SELECT * FROM payment_orders').all(), dbh.prepare('SELECT * FROM payments').all(), dbh.prepare('SELECT * FROM subscription_history').all(), dbh.prepare('SELECT * FROM telegram_notifications').all()])
     dbh.close()
-    return !dump.includes(FULL_CARD) || 'full card number found'
+    return (!dump.includes(LEAK.cardNumber) && !dump.includes('"987"') && !dump.includes('12/30')) || 'card data found in the database'
   })
+  await check('Admin purchases list: name, email, plan, price, date, activation status (admin only)', async () => {
+    const denied = await request('/api/admin/purchases', { token: cardToken })
+    const { data } = await request('/api/admin/purchases', { token: adminToken })
+    const row = data.purchases.find((p) => p.userEmail === cardUser.email)
+    return (denied.status === 403 && row && row.userName === 'Card Demo' && row.planId === 'aipro' && row.amount === 799 && row.purchasedAt && row.activated && row.currentlyActive && row.paymentType === 'Demo Payment') || JSON.stringify({ denied: denied.status, row })
+  })
+  await check('PAYMENT_MODE=live would disable the demo endpoint (config endpoint reports enabled in tests)', async () =>
+    (await request('/api/payments/demo/config')).data.enabled === true)
 } finally {
   server.kill()
   provider.close()

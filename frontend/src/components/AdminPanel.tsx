@@ -196,6 +196,7 @@ type AdminSection =
   | 'payments'
   | 'plans'
   | 'requests'
+  | 'purchases'
   | 'settings'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2874,6 +2875,135 @@ function PurchaseRequestsSection({ onToast }: { onToast: (msg: string, kind: Toa
   )
 }
 
+type AdminPurchase = {
+  orderId: string
+  userName: string | null
+  userEmail: string
+  planId: string
+  amount: number
+  currency: string
+  paymentType: string
+  purchasedAt: string
+  activated: boolean
+  currentlyActive: boolean
+  endsAt: string | null
+}
+
+/** All completed purchases (Demo Payment, provider, approved transfers). Refreshes itself every 10 s. */
+function PurchasesSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => void }) {
+  const [rows, setRows] = useState<AdminPurchase[]>([])
+  const [search, setSearch] = useState('')
+  const debouncedSearch = useDebouncedValue(search)
+  const [loading, setLoading] = useState(true)
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null)
+  const failedOnce = useRef(false)
+
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
+    try {
+      const params = new URLSearchParams()
+      if (debouncedSearch) params.set('search', debouncedSearch)
+      const data = await adminFetch<{ purchases: AdminPurchase[]; generatedAt: string }>(`/api/admin/purchases?${params.toString()}`)
+      setRows(data.purchases)
+      setUpdatedAt(data.generatedAt)
+      failedOnce.current = false
+    } catch (err) {
+      // Background refreshes report an error only once, not every 10 seconds.
+      if (!silent || !failedOnce.current) onToast(err instanceof Error ? err.message : 'Failed to load purchases', 'error')
+      failedOnce.current = true
+    } finally {
+      if (!silent) setLoading(false)
+    }
+  }, [debouncedSearch, onToast])
+
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void load(true) }, 10000)
+    return () => window.clearInterval(timer)
+  }, [load])
+
+  const revenue = rows.reduce((sum, row) => sum + row.amount, 0)
+
+  return (
+    <div className="admin-section">
+      <div className="admin-section-header">
+        <div><span className="eyebrow">Live · updates every 10 s</span><h2>Purchases</h2></div>
+        <button type="button" className="btn btn-secondary small" onClick={() => void load()} disabled={loading}>
+          <RefreshCw size={14} className={loading ? 'spin' : ''} /> Refresh
+        </button>
+      </div>
+
+      <div className="admin-stats-grid compact-stats">
+        <div className="admin-stat-card green">
+          <div className="admin-stat-icon"><WalletCards size={18} /></div>
+          <div><strong>{rows.length}</strong><span>Purchases</span></div>
+        </div>
+        <div className="admin-stat-card cyan">
+          <div className="admin-stat-icon"><TrendingUp size={18} /></div>
+          <div><strong>{formatMoney(revenue)}</strong><span>Total (incl. demo)</span></div>
+        </div>
+        <div className="admin-stat-card amber">
+          <div className="admin-stat-icon"><Sparkles size={18} /></div>
+          <div><strong>{rows.filter((row) => row.currentlyActive).length}</strong><span>Currently active</span></div>
+        </div>
+      </div>
+
+      <div className="admin-card">
+        <div className="admin-card-header">
+          <h3>Purchase list <span className="admin-count-badge">{rows.length}</span></h3>
+          <div className="table-tools">
+            <label className="search-field">
+              <Search size={15} />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by name or email" />
+            </label>
+          </div>
+        </div>
+        {updatedAt && <p className="admin-hint">Last update: {formatDate(updatedAt)}</p>}
+        {loading && rows.length === 0 ? (
+          <div className="admin-empty-state"><RefreshCw size={18} className="spin" /> Loading…</div>
+        ) : rows.length === 0 ? (
+          <div className="admin-empty-state">No purchases yet</div>
+        ) : (
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Email</th>
+                  <th>Plan</th>
+                  <th>Price</th>
+                  <th>Purchased</th>
+                  <th>Payment</th>
+                  <th>Activation</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.orderId}>
+                    <td><strong>{row.userName ?? '—'}</strong></td>
+                    <td>{row.userEmail}</td>
+                    <td>{row.planId.toUpperCase()}</td>
+                    <td>{formatMoney(row.amount, row.currency)}</td>
+                    <td>{formatDate(row.purchasedAt)}</td>
+                    <td>{row.paymentType}</td>
+                    <td>
+                      {!row.activated
+                        ? <span className="admin-pill danger">Not activated</span>
+                        : row.currentlyActive
+                          ? <span className="admin-pill success">Active{row.endsAt ? ` until ${formatDate(row.endsAt)}` : ''}</span>
+                          : <span className="admin-pill warning">Activated · ended / replaced</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
   const [activeSection, setActiveSection] = useState<AdminSection>('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -2911,6 +3041,7 @@ export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
     { id: 'reviews', label: 'Reviews', icon: MessageSquareText },
     { id: 'subscriptions', label: 'Subscriptions', icon: Crown },
     { id: 'payments', label: 'Payments', icon: WalletCards },
+    { id: 'purchases', label: 'Purchases', icon: WalletCards },
     { id: 'requests', label: 'Purchase requests', icon: Check },
     { id: 'plans', label: 'Plans', icon: Crown },
     { id: 'settings', label: 'Settings', icon: Settings }
@@ -3041,6 +3172,9 @@ export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
           )}
           {activeSection === 'payments' && (
             <PaymentsSection onToast={addToast} />
+          )}
+          {activeSection === 'purchases' && (
+            <PurchasesSection onToast={addToast} />
           )}
           {activeSection === 'requests' && (
             <PurchaseRequestsSection onToast={addToast} />

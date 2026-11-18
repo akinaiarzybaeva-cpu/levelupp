@@ -139,8 +139,11 @@ export async function getDemoPaymentConfig(): Promise<{ enabled: boolean }> {
   return parseJsonResponse<{ enabled: boolean }>(response)
 }
 
-/** Demo card checkout: only the last 4 digits and the expiry are sent; the full number never leaves the browser. */
-export async function submitDemoCardPayment(params: { planId: SubscriptionPlanId; fullName: string; email: string; cardLast4: string; cardBrand: string; expiry: string }): Promise<{ orderId: string; transactionId: string; status: 'paid'; endsAt: string }> {
+/**
+ * Demo Payment: card number, expiry and CVV are validated in the browser and never sent.
+ * `checkoutKey` is generated once per opened payment window so a retry cannot activate twice.
+ */
+export async function submitDemoPayment(params: { planId: SubscriptionPlanId; cardholderName: string; checkoutKey: string }): Promise<{ orderId: string; transactionId: string; status: 'paid'; planId: SubscriptionPlanId; endsAt: string | null; accessPlan: SubscriptionPlanId; alreadyProcessed?: boolean }> {
   const response = await fetch(`${API_BASE_URL}/api/payments/demo`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json' }),

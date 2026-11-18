@@ -6,7 +6,7 @@ import rateLimit from 'express-rate-limit'
 import { config } from './config/config.js'
 import { db } from './config/db.js'
 import { activateSubscription, cancelSubscription, expireDueSubscriptions, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
-import { initTelegram, notifyPurchase, sendTelegramMessage, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
+import { initTelegram, notifyPurchase, notifyRegistration, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
 import { AiError, aiConfig, askAssistant } from './ai.js'
 import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './config/provider.js'
 import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail } from './config/email.js'
@@ -720,12 +720,16 @@ app.get('/api/courses', (req, res) => {
 
 // ─── Authentication Endpoints ─────────────────────────────────────────────────
 
-async function notifyTelegramAboutRegistration({ name, email }) {
-  const safe = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const result = await sendTelegramMessage(`🆕 <b>New LevelUp registration</b>\nName: ${safe(name)}\nEmail: ${safe(email)}`)
-  if (!result.ok && !/not configured/i.test(result.error ?? '')) {
+/** Called only after the new account was saved; runs in the background and never throws. */
+function notifyTelegramAboutRegistration(email) {
+  try {
+    const row = db.prepare('SELECT rowid AS user_id, first_name, last_name, created_at FROM user_profiles WHERE user_email = ?').get(email)
+    if (!row) return
+    const name = `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() || email
+    void notifyRegistration(db, { name, email, userId: `#${row.user_id}`, registeredAt: row.created_at })
+  } catch (error) {
     // eslint-disable-next-line no-console
-    console.warn('[TELEGRAM] registration notification failed:', result.error)
+    console.warn('[TELEGRAM] could not prepare registration notification:', error instanceof Error ? error.message : error)
   }
 }
 
@@ -808,7 +812,7 @@ app.post('/api/auth/register', accountLimiter, (req, res) => {
     }
   })
 
-  void notifyTelegramAboutRegistration({ name, email })
+  notifyTelegramAboutRegistration(email)
 })
 
 // Used by the "Start learning" flow to decide between the login and register tabs.
@@ -2429,11 +2433,12 @@ app.post('/api/subscription/:userEmail/cancel', (req, res) => {
 })
 
 /** Telegram message for an activation (payment or admin grant). Never throws. */
-function notifySubscriptionActivated({ userEmail, planId, kind, subscription, transactionId, paymentStatus, paymentMethod, amount, currency, dedupeKey, fullName }) {
+function notifySubscriptionActivated({ userEmail, planId, kind, subscription, transactionId, paymentStatus, paymentMethod, amount, currency, dedupeKey, fullName, template, purchasedAt }) {
   try {
     const profile = db.prepare('SELECT rowid AS account_id, first_name, last_name FROM user_profiles WHERE user_email = ?').get(userEmail)
     const name = (fullName && String(fullName).trim()) || `${profile?.first_name ?? ''} ${profile?.last_name ?? ''}`.trim() || userEmail
     return notifyPurchase(db, {
+      template,
       kind,
       name,
       email: userEmail,
@@ -2443,7 +2448,7 @@ function notifySubscriptionActivated({ userEmail, planId, kind, subscription, tr
       amount,
       currency,
       paymentMethod,
-      purchasedAt: subscription?.purchased_at,
+      purchasedAt: purchasedAt ?? subscription?.purchased_at,
       endsAt: subscription?.ends_at,
       subscriptionStatus: subscription?.status ?? 'active',
       transactionId,
@@ -2800,9 +2805,10 @@ app.post('/api/admin/purchase-requests/:id/reject', adminApiLimiter, requireAdmi
   res.json({ ok: true, status: 'failed' })
 })
 
-// ─── Demo card checkout (no real charge) ──────────────────────────────────────
-// Enabled unless PAYMENT_MODE=live. The browser validates the card number and sends ONLY the
-// last 4 digits + expiry; the full number and CVV never reach the server, the database or Telegram.
+// ─── Demo Payment checkout (no real charge) ───────────────────────────────────
+// Enabled unless PAYMENT_MODE=live. The card form (number, expiry, CVV) is validated ONLY in the
+// browser: none of those values is sent to this server, stored in the database, logged or sent to
+// Telegram. The server receives the plan, the cardholder name and a one-time checkout key.
 
 function demoPaymentsEnabled() {
   return String(process.env.PAYMENT_MODE ?? '').trim().toLowerCase() !== 'live'
@@ -2811,6 +2817,8 @@ function demoPaymentsEnabled() {
 app.get('/api/payments/demo/config', (_req, res) => {
   res.json({ enabled: demoPaymentsEnabled() })
 })
+
+const CHECKOUT_KEY_PATTERN = /^[A-Za-z0-9-]{16,64}$/
 
 app.post('/api/payments/demo', purchaseRequestLimiter, (req, res) => {
   const sessionEmail = resolveAuthenticatedUserEmail(req)
@@ -2828,33 +2836,22 @@ app.post('/api/payments/demo', purchaseRequestLimiter, (req, res) => {
     return
   }
 
-  const fullName = clampText(req.body?.fullName, 120).trim()
-  const email = String(req.body?.email ?? '').trim().toLowerCase()
-  const cardLast4 = String(req.body?.cardLast4 ?? '').trim()
-  const cardBrand = ['Visa', 'Mastercard', 'Elcart', 'Card'].includes(req.body?.cardBrand) ? req.body.cardBrand : 'Card'
-  const expiry = String(req.body?.expiry ?? '').trim()
+  const cardholderName = clampText(req.body?.cardholderName, 120).trim()
+  const checkoutKey = String(req.body?.checkoutKey ?? '').trim()
+  if (cardholderName.length < 2 || !CHECKOUT_KEY_PATTERN.test(checkoutKey)) {
+    res.status(400).json({ error: 'Please fill in all required fields.', code: 'MISSING_FIELDS', fields: cardholderName.length < 2 ? ['cardholderName'] : ['checkoutKey'] })
+    return
+  }
 
-  const missing = []
-  if (fullName.length < 2) missing.push('fullName')
-  if (!email) missing.push('email')
-  if (!/^\d{4}$/.test(cardLast4)) missing.push('cardNumber')
-  if (!expiry) missing.push('expiry')
-  if (missing.length) {
-    res.status(400).json({ error: 'Please fill in all required fields.', code: 'MISSING_FIELDS', fields: missing })
-    return
-  }
-  if (!EMAIL_PATTERN.test(email)) {
-    res.status(400).json({ error: 'Invalid email address.', code: 'INVALID_EMAIL', fields: ['email'] })
-    return
-  }
-  if (email !== sessionEmail) {
-    res.status(400).json({ error: 'Email must match the signed-in account.', code: 'EMAIL_MISMATCH', fields: ['email'] })
-    return
-  }
-  const exp = /^(0[1-9]|1[0-2])\/(\d{2})$/.exec(expiry)
-  const now = new Date()
-  if (!exp || Number(`20${exp[2]}`) * 12 + Number(exp[1]) < now.getUTCFullYear() * 12 + now.getUTCMonth() + 1) {
-    res.status(400).json({ error: 'Card expiry date is invalid or in the past.', code: 'INVALID_EXPIRY', fields: ['expiry'] })
+  // Idempotency: the same checkout (double click, network retry) never activates twice.
+  const existing = db.prepare("SELECT * FROM payment_orders WHERE provider = 'demo' AND provider_order_id = ?").get(checkoutKey)
+  if (existing) {
+    if (existing.user_email !== sessionEmail) {
+      res.status(409).json({ error: 'Invalid checkout key.', code: 'DUPLICATE_SUBMIT' })
+      return
+    }
+    const sub = formatSubscriptionForUser(db, sessionEmail)
+    res.json({ orderId: existing.id, transactionId: existing.provider_payment_id, status: 'paid', planId: existing.plan_id, alreadyProcessed: true, endsAt: sub.endsAt, accessPlan: sub.accessPlan, amount: existing.amount, currency: existing.currency })
     return
   }
 
@@ -2871,26 +2868,18 @@ app.post('/api/payments/demo', purchaseRequestLimiter, (req, res) => {
     res.status(409).json({ error: 'Your current plan already includes this plan', code: 'PLAN_INCLUDED' })
     return
   }
-  // Double-click protection: one demo payment per user and plan every 15 seconds.
-  const recent = db.prepare("SELECT id FROM payment_orders WHERE user_email = ? AND plan_id = ? AND provider = 'demo' AND datetime(created_at) > datetime(?) LIMIT 1")
-    .get(sessionEmail, plan.id, new Date(Date.now() - 15 * 1000).toISOString())
-  if (recent) {
-    res.status(409).json({ error: 'This payment was just submitted.', code: 'DUPLICATE_SUBMIT' })
-    return
-  }
 
   const orderId = crypto.randomUUID()
   const transactionId = `DEMO-${crypto.randomBytes(5).toString('hex').toUpperCase()}`
-  const paymentMethod = `${cardBrand} •••• ${cardLast4}`
   const nowIso = new Date().toISOString()
   let activation
   try {
     activation = db.transaction(() => {
       db.prepare(`
-        INSERT INTO payment_orders (id, user_email, plan_id, payment_method, amount, currency, provider, provider_payment_id, status, is_activated,
+        INSERT INTO payment_orders (id, user_email, plan_id, payment_method, amount, currency, provider, provider_order_id, provider_payment_id, status, is_activated,
           customer_name, customer_email, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'demo', ?, 'paid', 1, ?, ?, ?, ?)
-      `).run(orderId, sessionEmail, plan.id, paymentMethod, plan.price, plan.currency, transactionId, fullName, email, nowIso, nowIso)
+        VALUES (?, ?, ?, 'Demo Payment', ?, ?, 'demo', ?, ?, 'paid', 1, ?, ?, ?, ?)
+      `).run(orderId, sessionEmail, plan.id, plan.price, plan.currency, checkoutKey, transactionId, cardholderName, sessionEmail, nowIso, nowIso)
       insertPaymentStmt.run({
         id: crypto.randomUUID(),
         order_id: orderId,
@@ -2899,18 +2888,62 @@ app.post('/api/payments/demo', purchaseRequestLimiter, (req, res) => {
         amount: plan.price,
         currency: plan.currency,
         status: 'completed',
-        raw_payload: JSON.stringify({ demo: true, card: paymentMethod, expiry }),
+        raw_payload: JSON.stringify({ demo: true }),
         created_at: nowIso
       })
-      return activateSubscription(db, { userEmail: sessionEmail, planId: plan.id, days: plan.durationDays, amount: plan.price, currency: plan.currency, paymentMethod, orderId, transactionId, source: 'demo' })
+      return activateSubscription(db, { userEmail: sessionEmail, planId: plan.id, days: plan.durationDays, amount: plan.price, currency: plan.currency, paymentMethod: 'Demo Payment', orderId, transactionId, source: 'demo' })
     })()
   } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    if (message.includes('idx_payment_orders_demo_key') || message.includes('payment_orders.provider_order_id')) {
+      res.status(409).json({ error: 'This checkout was already processed.', code: 'DUPLICATE_SUBMIT' })
+      return
+    }
     sendServerError(res, error, 'Failed to complete payment')
     return
   }
 
-  void notifySubscriptionActivated({ userEmail: sessionEmail, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID (demo, no real charge)', paymentMethod: `${paymentMethod} (exp ${expiry})`, amount: plan.price, currency: plan.currency, dedupeKey: `demo:${orderId}`, fullName })
-  res.status(201).json({ orderId, transactionId, status: 'paid', planId: plan.id, kind: activation.kind, endsAt: activation.subscription.ends_at, amount: plan.price, currency: plan.currency })
+  // Telegram only after the order and the subscription were saved (the transaction above committed).
+  const accountName = `${profile.first_name ?? ''} ${profile.last_name ?? ''}`.trim()
+  void notifySubscriptionActivated({ userEmail: sessionEmail, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID (demo)', paymentMethod: 'Demo Payment', amount: plan.price, currency: plan.currency, dedupeKey: `demo:${orderId}`, fullName: accountName || cardholderName, template: 'demo', purchasedAt: nowIso })
+  res.status(201).json({ orderId, transactionId, status: 'paid', planId: plan.id, kind: activation.kind, endsAt: activation.subscription.ends_at, accessPlan: plan.id, amount: plan.price, currency: plan.currency })
+})
+
+app.get('/api/admin/purchases', adminApiLimiter, requireAdminAuth, (req, res) => {
+  const search = String(req.query.search ?? '').trim().toLowerCase()
+  const params = []
+  let where = "WHERE o.status = 'paid'"
+  if (search) {
+    where += ' AND (LOWER(o.user_email) LIKE ? OR LOWER(COALESCE(o.customer_name, \'\')) LIKE ? OR LOWER(COALESCE(u.first_name, \'\') || \' \' || COALESCE(u.last_name, \'\')) LIKE ?)'
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+  }
+  const rows = db.prepare(`
+    SELECT o.id, o.user_email, o.plan_id, o.amount, o.currency, o.provider, o.payment_method, o.is_activated, o.customer_name, o.created_at,
+           u.first_name, u.last_name, s.plan_id AS current_plan, s.status AS sub_status, s.ends_at
+    FROM payment_orders o
+    LEFT JOIN user_profiles u ON u.user_email = o.user_email
+    LEFT JOIN user_subscriptions s ON s.user_email = o.user_email
+    ${where}
+    ORDER BY datetime(o.created_at) DESC
+    LIMIT 200
+  `).all(...params)
+  const now = Date.now()
+  res.json({
+    purchases: rows.map((row) => ({
+      orderId: row.id,
+      userName: `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() || row.customer_name || null,
+      userEmail: row.user_email,
+      planId: row.plan_id,
+      amount: row.amount,
+      currency: row.currency,
+      paymentType: row.provider === 'demo' ? 'Demo Payment' : row.payment_method,
+      purchasedAt: row.created_at,
+      activated: Boolean(row.is_activated),
+      currentlyActive: row.current_plan === row.plan_id && row.sub_status !== 'expired' && row.ends_at != null && new Date(row.ends_at).getTime() > now,
+      endsAt: row.ends_at ?? null
+    })),
+    generatedAt: new Date().toISOString()
+  })
 })
 
 // ─── User Profile & Course Progress Endpoints ─────────────────────────────────
