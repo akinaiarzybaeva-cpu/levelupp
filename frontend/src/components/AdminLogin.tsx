@@ -3,7 +3,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertCircle, CheckCircle, Eye, EyeOff, Lock, ShieldCheck } from 'lucide-react'
 import { API_BASE_URL, fetchWithWakeRetry, isNetworkError } from '../api'
 import { AdminLanguageSwitch, useAdminT } from './adminI18n'
-import { useLanguage } from '../appShared'
+import AdminForgotPassword from './AdminForgotPassword'
+import { ADMIN_LOGIN_NOTICE_KEY } from './AdminFirstLogin'
 
 type AdminLoginProps = {
   isLoggedIn: boolean
@@ -22,6 +23,17 @@ type AdminUser = {
 
 const API_BASE = API_BASE_URL
 
+/** One-time notice left by the first-login password change before it logged the admin out. */
+function consumeLoginNotice(): boolean {
+  try {
+    const value = window.sessionStorage.getItem(ADMIN_LOGIN_NOTICE_KEY)
+    window.sessionStorage.removeItem(ADMIN_LOGIN_NOTICE_KEY)
+    return value === 'password-changed'
+  } catch {
+    return false
+  }
+}
+
 function safeNextPath(value: string | null): string {
   const next = String(value ?? '').trim()
   return next.startsWith('/') && !next.startsWith('//') ? next : '/admin'
@@ -29,10 +41,12 @@ function safeNextPath(value: string | null): string {
 
 export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLoginProps) {
   const t = useAdminT()
-  const language = useLanguage()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const [mode, setMode] = useState<'login' | 'forgot'>('login')
+  // A started recovery (code window / new password) survives a page refresh.
+  const [mode, setMode] = useState<'login' | 'forgot'>(() => {
+    try { return window.sessionStorage.getItem('levelup-admin-reset-flow') ? 'forgot' : 'login' } catch { return 'login' }
+  })
   const [email, setEmail] = useState(() => {
     if (typeof window !== 'undefined') {
       return window.localStorage.getItem('levelup-admin-remembered-email') ?? ''
@@ -51,7 +65,7 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(() =>
     searchParams.get('reason') === 'forbidden'
       ? { kind: 'error', message: "This account does not have administrator access. Sign in with the administrator account." }
-      : searchParams.get('reset') === 'success'
+      : searchParams.get('reset') === 'success' || consumeLoginNotice()
         ? { kind: 'success', message: "Password changed successfully. Now sign in." }
         : null
   )
@@ -140,35 +154,6 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
     }
   }
 
-  const handleForgotPassword = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setNotice(null)
-
-    if (!email.trim()) {
-      setNotice({ kind: 'error', message: "Enter the administrator email address" })
-      return
-    }
-
-    setSubmitting(true)
-    try {
-      await fetch(`${API_BASE}/api/auth/forgot-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.trim().toLowerCase(), language })
-      })
-
-      // Generic success message to protect against email enumeration
-      setNotice({
-        kind: 'success',
-        message: "If this email belongs to the administrator, a password reset link has been sent. Check your inbox (or the server console if email is in local mode)."
-      })
-    } catch {
-      setNotice({ kind: 'success', message: "Password reset request submitted. Check your inbox." })
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
   return (
     <div className="admin-login-shell">
       <div className="admin-login-card">
@@ -248,37 +233,15 @@ export default function AdminLogin({ isLoggedIn, userRole, onLogin }: AdminLogin
             </div>
           </form>
         ) : (
-          <form className="admin-login-form" onSubmit={(e) => void handleForgotPassword(e)}>
-            <h2>{t("Reset Password")}</h2>
-            <p className="admin-login-subtitle">{t("Enter the administrator email to receive a password reset link.")}</p>
-
-            <label>
-              <span>{t("Administrator Email")}</span>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => { setEmail(e.target.value); setNotice(null) }}
-                placeholder="admin@levelup.kg"
-                autoComplete="email"
-                autoFocus
-              />
-            </label>
-
-            {notice && (
-              <div className={`admin-notice admin-notice-${notice.kind}`}>
-                {notice.kind === 'success' ? <CheckCircle size={14} /> : <AlertCircle size={14} />}
-                <span>{t(notice.message)}</span>
-              </div>
-            )}
-
-            <button type="submit" className="btn btn-primary full-width" disabled={submitting}>
-              {submitting ? t("Sending Link…") : t("Send Reset Link")}
-            </button>
-
-            <button type="button" className="btn btn-secondary full-width" onClick={() => { setMode('login'); setNotice(null) }}>
-              {t("Back to Login")}
-            </button>
-          </form>
+          <AdminForgotPassword
+            initialEmail={email}
+            onCancel={() => { setMode('login'); setNotice(null) }}
+            onDone={() => {
+              setMode('login')
+              setPassword('')
+              setNotice({ kind: 'success', message: "Password changed successfully. Now sign in." })
+            }}
+          />
         )}
       </div>
     </div>

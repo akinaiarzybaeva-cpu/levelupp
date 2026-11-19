@@ -7,9 +7,11 @@ import { config } from './config/config.js'
 import { db } from './config/db.js'
 import { activateSubscription, cancelSubscription, expireDueSubscriptions, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
 import { initTelegram, notifyPurchase, notifyPurchaseRequest, notifyRegistration, notifyReview, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
-import { AiError, aiConfig, askAssistant, clearAiHistory, deleteAiExchange, initAiHistory, listAiHistory, saveAiExchange } from './ai.js'
+import { QUESTION_NOT_ALLOWED_MESSAGE, getKnowledge, getPreparedAnswer, resolveAllowedQuestion } from './aiQuestions.js'
+import { aiConfig, clearAiHistory, deleteAiExchange, initAiHistory, listAiHistory, saveAiExchange } from './ai.js'
 import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './config/provider.js'
-import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail, emailLanguage } from './config/email.js'
+import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail, buildAdminResetCodeEmail, emailLanguage } from './config/email.js'
+import { initAdminReset, registerAdminResetRoutes } from './adminReset.js'
 
 /** Public URL of the e-mail logo (frontend/public/email/levelup-logo.png). */
 const emailLogoUrl = () => (config.frontendUrl ? `${String(config.frontendUrl).replace(/\/+$/, '')}/email/levelup-logo.png` : '')
@@ -82,7 +84,8 @@ app.use(express.json({
 // Rate limiter for login (10 req/15min per IP)
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 15,
+  // Login attempts per IP per 15 min (env override for operators and the test suite).
+  max: Math.max(1, Number(process.env.LOGIN_RATE_LIMIT_MAX) || 15),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts. Try again in 15 minutes.' }
@@ -120,6 +123,7 @@ const adminApiLimiter = rateLimit({
 
 initBilling(db)
 initAiHistory(db)
+initAdminReset(db)
 initTelegram(db)
 
 const insertOrderStmt = db.prepare(`
@@ -449,7 +453,7 @@ function requireAdminAuth(req, res, next) {
     return
   }
 
-  const profile = db.prepare('SELECT user_email, role, account_status, is_blocked FROM user_profiles WHERE user_email = ?').get(userEmail)
+  const profile = db.prepare('SELECT user_email, role, account_status, is_blocked, must_change_password FROM user_profiles WHERE user_email = ?').get(userEmail)
   if (!profile) {
     res.status(401).json({ error: 'Account not found.' })
     return
@@ -468,10 +472,19 @@ function requireAdminAuth(req, res, next) {
     return
   }
 
+  // First sign-in with the initial password: only the password change (and the account info) is allowed.
+  const routePath = String(req.originalUrl ?? '').split('?')[0]
+  if (profile.must_change_password && !ADMIN_ROUTES_BEFORE_PASSWORD_CHANGE.has(`${req.method} ${routePath}`)) {
+    res.status(403).json({ error: 'Change the initial password before using the admin panel.', code: 'PASSWORD_CHANGE_REQUIRED' })
+    return
+  }
+
   req.adminEmail = userEmail
   req.adminProfile = profile
   next()
 }
+
+const ADMIN_ROUTES_BEFORE_PASSWORD_CHANGE = new Set(['PUT /api/admin/settings/password', 'GET /api/admin/account'])
 
 function getPublicUserRecord(profile) {
   const firstName = profile.first_name ?? ''
@@ -489,6 +502,7 @@ function getPublicUserRecord(profile) {
     role: profile.role,
     accountStatus: profile.account_status,
     isBlocked: Boolean(profile.is_blocked),
+    mustChangePassword: Boolean(profile.must_change_password),
     createdAt: profile.created_at,
     updatedAt: profile.updated_at
   }
@@ -579,6 +593,8 @@ function ensureSingleAdmin() {
   })
 
   db.prepare("UPDATE user_profiles SET role = 'User', updated_at = ? WHERE role = 'Admin' AND user_email != ?").run(nowIso, adminEmail)
+  // The initial password comes from an env var: the administrator must replace it at first sign-in.
+  db.prepare('UPDATE user_profiles SET must_change_password = 1 WHERE user_email = ?').run(adminEmail)
   // eslint-disable-next-line no-console
   console.log(`[ADMIN SETUP] Administrator account created: ${adminEmail}`)
 }
@@ -1732,69 +1748,65 @@ app.post('/api/admin/ai-pro/user', adminApiLimiter, requireAdminAuth, (req, res)
 
 // ─── AI Assistant Chat Endpoint (Backend verified access) ─────────────────────
 
-app.post('/api/ai/chat', async (req, res) => {
+/**
+ * AI Pro access for the assistant: signed in, service enabled by the admin, account not blocked,
+ * and an active AI PRO plan (or the administrator). Returns the email, or answers the request itself.
+ */
+function requireAiProUser(req, res) {
+  const userEmail = resolveAuthenticatedUserEmail(req)
+  if (!userEmail) {
+    res.status(401).json({ error: 'Authentication required. Please log in.' })
+    return null
+  }
+  const setting = db.prepare("SELECT value FROM system_settings WHERE key = 'ai_pro_enabled'").get()
+  if (setting && setting.value === 'false') {
+    res.status(503).json({ error: 'AI Pro service is currently disabled by administrator.', code: 'AI_DISABLED' })
+    return null
+  }
+  const profile = getUserProfileStmt.get(userEmail)
+  if (!profile || isProfileBlocked(profile)) {
+    res.status(403).json({ error: 'Account is not allowed to use this feature.' })
+    return null
+  }
+  const isAdmin = userEmail === config.adminEmail && normalizeRoleName(profile.role) === 'Admin'
+  if (!isAdmin && getAccessPlan(db, userEmail) !== 'aipro') {
+    res.status(403).json({ error: 'AI Pro subscription is required to use this feature.' })
+    return null
+  }
+  return userEmail
+}
+
+// The assistant answers ONLY the 15 prepared questions, from the LevelUp knowledge base
+// (backend/src/aiKnowledge). The question is chosen by its id; a text is accepted only when it is
+// exactly one of the 45 prepared questions. Nothing is sent to an external AI provider.
+app.post('/api/ai/chat', (req, res) => {
   try {
-    const userEmail = resolveAuthenticatedUserEmail(req)
-    if (!userEmail) {
-      res.status(401).json({ error: 'Authentication required. Please log in.' })
-      return
-    }
+    const userEmail = requireAiProUser(req, res)
+    if (!userEmail) return
 
-    // Check system availability
-    const setting = db.prepare("SELECT value FROM system_settings WHERE key = 'ai_pro_enabled'").get()
-    if (setting && setting.value === 'false') {
-      res.status(503).json({ error: 'AI Pro service is currently disabled by administrator.', code: 'AI_DISABLED' })
-      return
-    }
-
-    const profile = getUserProfileStmt.get(userEmail)
-    if (!profile || isProfileBlocked(profile)) {
-      res.status(403).json({ error: 'Account is not allowed to use this feature.' })
-      return
-    }
-
-    // Check authorization: Must be the administrator OR have an active AI Pro subscription
-    const isAdmin = userEmail === config.adminEmail && normalizeRoleName(profile.role) === 'Admin'
-    const hasAiPro = getAccessPlan(db, userEmail) === 'aipro'
-
-    if (!isAdmin && !hasAiPro) {
-      res.status(403).json({ error: 'AI Pro subscription is required to use this feature.' })
-      return
-    }
-
-    const question = clampText(req.body?.question, 4000)
-    const topic = clampText(req.body?.topic ?? 'General Programming', 100)
     const language = String(req.body?.language ?? 'ru').trim().toLowerCase()
-
-    if (!question) {
-      res.status(400).json({ error: 'Question is required' })
-      return
-    }
-
-    const rawHistory = Array.isArray(req.body?.history) ? req.body.history.slice(-10) : []
-    const history = []
-    for (const item of rawHistory) {
-      const role = item?.role === 'assistant' ? 'assistant' : item?.role === 'user' ? 'user' : null
-      const content = clampText(item?.content, 4000)
-      if (!role || !content) continue
-      if (history.length === 0 && role !== 'user') continue
-      if (history.length && history[history.length - 1].role === role) continue
-      history.push({ role, content })
-    }
-    if (history.length && history[history.length - 1].role === 'user') history.pop()
-
     const lang = ['kg', 'ru', 'en'].includes(language) ? language : 'ru'
-    const result = await askAssistant({ question, topic, language: lang, history })
-    // Only real answers are stored; a failed call leaves the saved history untouched.
-    const saved = saveAiExchange(db, { userEmail, question, answer: result.answer, language: lang, replaceLast: req.body?.regenerate === true })
-    res.json({ ok: true, answer: result.answer, model: result.model, truncated: result.truncated, questionId: saved.questionId, answerId: saved.answerId })
-  } catch (err) {
-    if (err instanceof AiError) {
-      res.status(err.status).json({ error: err.message, code: err.code })
+    const allowed = resolveAllowedQuestion({ questionId: req.body?.questionId, question: clampText(req.body?.question, 500), language: lang })
+    if (!allowed) {
+      res.status(400).json({ error: QUESTION_NOT_ALLOWED_MESSAGE[lang], code: 'QUESTION_NOT_ALLOWED' })
       return
     }
+
+    const answer = getPreparedAnswer(allowed.id, lang)
+    const saved = saveAiExchange(db, { userEmail, question: allowed.text, answer, language: lang, questionId: allowed.id })
+    res.json({ ok: true, source: 'knowledge-base', questionId: allowed.id, question: allowed.text, answer, questionMessageId: saved.questionId, answerId: saved.answerId })
+  } catch (err) {
     sendServerError(res, err, 'AI service error')
   }
+})
+
+// All 15 questions with their answers in one language: lets the page switch an open answer to
+// the new site language instantly. Same AI Pro access rule as the chat.
+app.get('/api/ai/knowledge', (req, res) => {
+  const userEmail = requireAiProUser(req, res)
+  if (!userEmail) return
+  const language = String(req.query.language ?? 'ru').trim().toLowerCase()
+  res.json({ ok: true, language: ['kg', 'ru', 'en'].includes(language) ? language : 'ru', items: getKnowledge(language) })
 })
 
 // The signed-in user's own saved AI conversation (no plan check: reading or deleting your own
@@ -2111,6 +2123,11 @@ app.post('/api/admin/telegram/test', adminApiLimiter, requireAdminAuth, async (_
 
 // ─── ADMIN: Settings — Change Admin Password ──────────────────────────────────
 
+app.get('/api/admin/account', adminApiLimiter, requireAdminAuth, (req, res) => {
+  const profile = getUserProfileStmt.get(req.adminEmail)
+  res.json({ ok: true, email: req.adminEmail, mustChangePassword: Boolean(profile?.must_change_password), updatedAt: profile?.updated_at ?? null })
+})
+
 app.put('/api/admin/settings/password', adminApiLimiter, requireAdminAuth, async (req, res) => {
   const userEmail = req.adminEmail
 
@@ -2171,6 +2188,8 @@ app.put('/api/admin/settings/password', adminApiLimiter, requireAdminAuth, async
     created_at: profile.created_at,
     updated_at: nowIso
   })
+
+  db.prepare('UPDATE user_profiles SET must_change_password = 0 WHERE user_email = ?').run(userEmail)
 
   // Revoke all existing sessions — force re-login
   db.prepare('UPDATE user_sessions SET revoked = 1, updated_at = ? WHERE user_email = ? AND revoked = 0').run(nowIso, userEmail)
@@ -3264,6 +3283,8 @@ app.put('/api/users/:userEmail/notifications', (req, res) => {
   })
 })
 
+registerAdminResetRoutes(app, { db, config, getUserProfileStmt, isProfileBlocked, normalizeRoleName, hashPassword, verifyPassword, sendEmail, buildAdminResetCodeEmail, buildPasswordChangedEmail, emailLanguage, emailLogoUrl })
+
 // ─── FORGOT & RESET PASSWORD (administrator and regular users) ────────────────
 
 app.post('/api/auth/forgot-password', passwordResetLimiter, async (req, res) => {
@@ -3418,7 +3439,7 @@ app.post('/api/auth/reset-password', passwordResetLimiter, (req, res) => {
   const consumed = db.transaction(() => {
     const claim = db.prepare('UPDATE password_reset_tokens SET used = 1 WHERE id = ? AND used = 0').run(tokenId)
     if (claim.changes !== 1) return false
-    db.prepare('UPDATE user_profiles SET password_hash = ?, updated_at = ? WHERE user_email = ?').run(hashedNext, nowIso, userEmail)
+    db.prepare('UPDATE user_profiles SET password_hash = ?, must_change_password = 0, updated_at = ? WHERE user_email = ?').run(hashedNext, nowIso, userEmail)
     db.prepare('UPDATE user_sessions SET revoked = 1, updated_at = ? WHERE user_email = ? AND revoked = 0').run(nowIso, userEmail)
     return true
   })()

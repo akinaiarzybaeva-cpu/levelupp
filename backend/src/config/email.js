@@ -147,3 +147,42 @@ export function buildPasswordChangedEmail({ isAdmin = false, language = 'ru', lo
   const text = `${T.changedTitle}\n\n${T.changedIntro(isAdmin)}\n\n${T.changedWarning}`
   return { html, text, subject: T.changedSubject(isAdmin) }
 }
+
+// One-time 6-digit code for the administrator password reset.
+const CODE_TEXT = {
+  ru: {
+    subject: 'Код восстановления пароля LevelUp',
+    title: 'Восстановление пароля',
+    intro: 'Вы запросили восстановление пароля администратора LevelUp. Введите этот код на странице входа:',
+    expiry: (m) => `Код действует ${m} минут и может быть использован только один раз.`,
+    warning: 'Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо — пароль останется прежним. Никому не сообщайте этот код.',
+  },
+  kg: {
+    subject: 'LevelUp сырсөзүн калыбына келтирүү коду',
+    title: 'Сырсөздү калыбына келтирүү',
+    intro: 'Сиз LevelUp администраторунун сырсөзүн калыбына келтирүүнү сурадыңыз. Бул кодду кирүү барагына жазыңыз:',
+    expiry: (m) => `Код ${m} мүнөт жарактуу жана бир гана жолу колдонулат.`,
+    warning: 'Эгер сиз сырсөздү калыбына келтирүүнү сураган эмес болсоңуз, бул катты этибарга албаңыз — сырсөз өзгөрбөйт. Бул кодду эч кимге айтпаңыз.',
+  },
+  en: {
+    subject: 'Your LevelUp password reset code',
+    title: 'Password reset',
+    intro: 'You requested a password reset for the LevelUp administrator account. Enter this code on the sign-in page:',
+    expiry: (m) => `The code is valid for ${m} minutes and can be used only once.`,
+    warning: 'If you did not request a password reset, simply ignore this email — your password will stay the same. Never share this code with anyone.',
+  },
+}
+
+export function buildAdminResetCodeEmail({ code, expiresMinutes = 5, language = 'ru', logoUrl = '' }) {
+  const lang = emailLanguage(language)
+  const T = CODE_TEXT[lang]
+  const digits = String(code).split('').map((d) => `<span style="display:inline-block;min-width:34px;padding:10px 0;margin:0 3px;border-radius:10px;background:#e7f8ee;color:#06281d;font-size:26px;font-weight:800;font-family:'Courier New',monospace">${escHtml(d)}</span>`).join('')
+  const body = `
+    <p style="margin:0 0 20px">${escHtml(T.intro)}</p>
+    <p style="margin:0 0 24px;text-align:center;white-space:nowrap" aria-label="${escHtml(code)}">${digits}</p>
+    <p style="margin:0 0 12px;padding:12px 14px;background:#e7f8ee;border-radius:12px;color:#06281d;font-size:14px">⏱ ${escHtml(T.expiry(expiresMinutes))}</p>
+    <p style="margin:0;padding:12px 14px;background:#fff4e5;border-radius:12px;color:#8a4b00;font-size:14px">⚠ ${escHtml(T.warning)}</p>`
+  const html = emailLayout({ lang, logoUrl, title: T.title, body })
+  const text = `${T.title}\n\n${T.intro}\n\n${code}\n\n${T.expiry(expiresMinutes)}\n\n${T.warning}`
+  return { html, text, subject: T.subject }
+}

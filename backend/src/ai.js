@@ -118,27 +118,30 @@ export function initAiHistory(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_user ON ai_chat_messages (user_email, id);
   `)
+  // id of the prepared question (lets the page show the saved answer in the current site language)
+  const columns = new Set(db.prepare('PRAGMA table_info(ai_chat_messages)').all().map((c) => c.name))
+  if (!columns.has('question_id')) db.exec('ALTER TABLE ai_chat_messages ADD COLUMN question_id TEXT')
 }
 
 export function listAiHistory(db, userEmail, limit = 100) {
-  const rows = db.prepare('SELECT id, role, content, language, created_at FROM ai_chat_messages WHERE user_email = ? ORDER BY id DESC LIMIT ?').all(userEmail, limit)
-  return rows.reverse().map((row) => ({ id: String(row.id), role: row.role, text: row.content, language: row.language, createdAt: row.created_at }))
+  const rows = db.prepare('SELECT id, role, content, language, question_id, created_at FROM ai_chat_messages WHERE user_email = ? ORDER BY id DESC LIMIT ?').all(userEmail, limit)
+  return rows.reverse().map((row) => ({ id: String(row.id), role: row.role, text: row.content, language: row.language, questionId: row.question_id ?? null, createdAt: row.created_at }))
 }
 
 // Saves one question/answer pair. With replaceLast the previous answer to the same question
 // (the one being regenerated) is replaced instead of duplicated.
-export function saveAiExchange(db, { userEmail, question, answer, language, replaceLast = false }) {
+export function saveAiExchange(db, { userEmail, question, answer, language, questionId = null, replaceLast = false, isSameQuestion = (text) => text === question }) {
   const tx = db.transaction(() => {
     if (replaceLast) {
       const last = db.prepare('SELECT id, role, content FROM ai_chat_messages WHERE user_email = ? ORDER BY id DESC LIMIT 2').all(userEmail)
-      if (last.length === 2 && last[0].role === 'assistant' && last[1].role === 'user' && last[1].content === question) {
+      if (last.length === 2 && last[0].role === 'assistant' && last[1].role === 'user' && isSameQuestion(last[1].content)) {
         db.prepare('DELETE FROM ai_chat_messages WHERE id IN (?, ?)').run(last[0].id, last[1].id)
       }
     }
     const now = new Date()
-    const insert = db.prepare('INSERT INTO ai_chat_messages (user_email, role, content, language, created_at) VALUES (?, ?, ?, ?, ?)')
-    const q = insert.run(userEmail, 'user', question, language, now.toISOString())
-    const a = insert.run(userEmail, 'assistant', answer, language, new Date(now.getTime() + 1).toISOString())
+    const insert = db.prepare('INSERT INTO ai_chat_messages (user_email, role, content, language, question_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    const q = insert.run(userEmail, 'user', question, language, questionId, now.toISOString())
+    const a = insert.run(userEmail, 'assistant', answer, language, questionId, new Date(now.getTime() + 1).toISOString())
     db.prepare(`DELETE FROM ai_chat_messages WHERE user_email = ? AND id NOT IN (
       SELECT id FROM ai_chat_messages WHERE user_email = ? ORDER BY id DESC LIMIT ?)`).run(userEmail, userEmail, HISTORY_LIMIT)
     return { questionId: String(q.lastInsertRowid), answerId: String(a.lastInsertRowid) }

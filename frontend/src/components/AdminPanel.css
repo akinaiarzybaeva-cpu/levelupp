@@ -1012,3 +1012,116 @@
 @media (max-width: 520px) {
   .admin-login-card > .admin-lang-switch { top: 10px; right: 10px; }
 }
+
+/* ── Admin password recovery by e-mail code ───────────────────────────── */
+.admin-reset-steps { display: flex; gap: 6px; justify-content: center; margin-bottom: 4px; }
+.admin-reset-steps i { width: 28px; height: 5px; border-radius: 999px; background: var(--border); }
+.admin-reset-steps i.active { background: var(--primary, #1fbf6e); }
+.admin-reset-steps i.done { background: color-mix(in srgb, var(--primary, #1fbf6e) 45%, transparent); }
+
+.admin-code-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(4, 16, 12, 0.55);
+  backdrop-filter: blur(4px);
+  animation: admin-fade-in 0.18s ease;
+}
+.admin-code-dialog {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  background: var(--surface);
+  color: var(--text-primary, inherit);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 28px 24px 22px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+  text-align: center;
+  animation: admin-pop-in 0.2s ease;
+}
+.admin-code-dialog h2 { margin: 6px 0 4px; font-size: 1.3rem; }
+.admin-code-dialog form { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
+.admin-code-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary, inherit);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.admin-code-icon {
+  width: 52px;
+  height: 52px;
+  margin: 4px auto 0;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: linear-gradient(135deg, #0b7f4a, #1fbf6e);
+}
+.admin-otp { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; max-width: 336px; width: 100%; margin: 0 auto; }
+.admin-otp input {
+  width: 100%;
+  min-width: 0;
+  height: 54px;
+  padding: 0;
+  text-align: center;
+  font-size: 1.5rem;
+  font-weight: 800;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  border-radius: 12px;
+  border: 1.5px solid var(--border);
+  background: var(--surface-soft, var(--surface));
+  color: var(--text-primary, inherit);
+  caret-color: var(--primary, #1fbf6e);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.admin-otp input:focus { outline: none; border-color: var(--primary, #1fbf6e); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary, #1fbf6e) 22%, transparent); }
+.admin-otp input:disabled { opacity: 0.5; }
+.admin-code-timer { margin: 0; font-size: 0.9rem; color: var(--text-secondary, inherit); font-variant-numeric: tabular-nums; }
+.admin-code-timer.expired { color: #e5484d; font-weight: 700; }
+.admin-code-actions { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.admin-code-actions .text-button { display: inline-flex; align-items: center; gap: 6px; }
+.admin-code-actions .text-button:disabled { opacity: 0.55; cursor: not-allowed; }
+.admin-reset-step .btn svg { margin-right: 4px; vertical-align: -2px; }
+.admin-first-login { max-width: 460px; }
+@keyframes admin-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes admin-pop-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+@media (max-width: 420px) {
+  .admin-code-dialog { padding: 24px 16px 18px; }
+  .admin-otp { gap: 6px; }
+  .admin-otp input { height: 48px; font-size: 1.3rem; }
+  .admin-code-actions { flex-direction: column; align-items: center; }
+}
+
+/* Pills holding a sentence (not a one-word status): keep normal case, the text itself is capitalised */
+.admin-pill.admin-pill-sentence { text-transform: none; }
+
+/* ── Light Mode readability (WCAG AA) ─────────────────────────────────────── */
+/* Count badges next to section titles: a general light rule recoloured their text grey on green. */
+.admin-card-header .admin-count-badge,
+h3 .admin-count-badge,
+:root:not([data-theme='dark']) h3 .admin-count-badge { background: #0b7f4a; color: #ffffff; }
+:root[data-theme='dark'] h3 .admin-count-badge { background: var(--primary); color: #04140d; }
+/* Course tags in the admin table: the course accent colour is darkened enough to read on its tint. */
+:root:not([data-theme='dark']) .admin-table .admin-course-tag { color: color-mix(in srgb, var(--tag-accent, currentColor) 45%, #0a1726) !important; }
+:root[data-theme='dark'] .admin-table .admin-course-tag { color: color-mix(in srgb, var(--tag-accent, currentColor) 55%, #ffffff) !important; }
+/* Links on the admin login card */
+:root:not([data-theme='dark']) .admin-login-options .text-button,
+:root:not([data-theme='dark']) .admin-login-footer a,
+:root:not([data-theme='dark']) .admin-code-actions .text-button { color: var(--primary-strong); }

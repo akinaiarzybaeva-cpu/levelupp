@@ -1,5 +1,6 @@
 import { Fragment, useState, type ReactNode } from 'react'
-import { Brain, Check, Copy, RefreshCw, UserRound } from 'lucide-react'
+import { Brain, Check, Copy, UserRound } from 'lucide-react'
+import { highlightCode } from './codeHighlight'
 
 /** Inline Markdown: `code`, **bold**, *italic*. Rendered as React elements (no HTML injection). */
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
@@ -22,7 +23,37 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
 }
 
 /** Block Markdown used by the AI answers: headings, lists, fenced code, quotes, paragraphs. */
-function renderMarkdown(source: string): ReactNode[] {
+type CodeLabels = { copyCode: string; copied: string }
+
+/** A code example: language label, syntax highlighting and its own "Copy code" button. */
+function CodeBlock({ code, language, labels }: { code: string; language: string; labels?: CodeLabels }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+  return (
+    <div className="ai-md-codeblock" data-lang={language || undefined}>
+      <div className="ai-md-code-bar">
+        <span className="ai-md-code-lang">{language || 'code'}</span>
+        {labels && (
+          <button type="button" className="ai-md-code-copy" onClick={() => { void copy() }} aria-label={labels.copyCode}>
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+            <span>{copied ? labels.copied : labels.copyCode}</span>
+          </button>
+        )}
+      </div>
+      <pre className="ai-md-code"><code>{highlightCode(code, language)}</code></pre>
+    </div>
+  )
+}
+
+function renderMarkdown(source: string, labels?: CodeLabels): ReactNode[] {
   const lines = source.replace(/\r\n/g, '\n').split('\n')
   const blocks: ReactNode[] = []
   let i = 0
@@ -37,12 +68,7 @@ function renderMarkdown(source: string): ReactNode[] {
       i++
       while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) code.push(lines[i++])
       i++ // closing fence (or end of text)
-      blocks.push(
-        <pre key={key++} className="ai-md-code" data-lang={fence[1] || undefined}>
-          {fence[1] && <span className="ai-md-code-lang">{fence[1]}</span>}
-          <code>{code.join('\n')}</code>
-        </pre>
-      )
+      blocks.push(<CodeBlock key={key++} code={code.join('\n')} language={fence[1]} labels={labels} />)
       continue
     }
 
@@ -103,18 +129,17 @@ function renderMarkdown(source: string): ReactNode[] {
 }
 
 /** One chat bubble of the AI assistant: assistant answer, user question, or the "thinking…" indicator. */
-export default function AIMessage({ role, text, userLabel, loading = false, onRegenerate, regenerateLabel, copyLabel, copiedLabel, busy = false }: {
+/** One chat bubble of the AI assistant: prepared answer, user question, or the "thinking…" indicator. */
+export default function AIMessage({ role, text, userLabel, loading = false, copyLabel, copiedLabel, copyCodeLabel }: {
   role: 'assistant' | 'user'
   text: string
   /** Shown above the user's own messages (their initial). */
   userLabel?: string
   loading?: boolean
-  /** Only passed for the last answer: asks the AI for a new answer to the same question. */
-  onRegenerate?: () => void
-  regenerateLabel?: string
   copyLabel?: string
   copiedLabel?: string
-  busy?: boolean
+  /** Label of the "Copy code" button on every code example. */
+  copyCodeLabel?: string
 }) {
   const [copied, setCopied] = useState(false)
 
@@ -140,27 +165,21 @@ export default function AIMessage({ role, text, userLabel, loading = false, onRe
     }
   }
 
+  const codeLabels = copyCodeLabel ? { copyCode: copyCodeLabel, copied: copiedLabel ?? '' } : undefined
+
   return (
     <div className={isAssistant ? 'ai-chat-message assistant' : 'ai-chat-message user'}>
       <div className="ai-chat-message-head">
         {isAssistant ? <Brain size={14} /> : <UserRound size={14} />}
         <span>{isAssistant ? 'LevelUp AI' : userLabel}</span>
       </div>
-      {isAssistant ? <div className="ai-md">{renderMarkdown(text)}</div> : <p>{text}</p>}
-      {isAssistant && (copyLabel || onRegenerate) && (
+      {isAssistant ? <div className="ai-md">{renderMarkdown(text, codeLabels)}</div> : <p>{text}</p>}
+      {isAssistant && copyLabel && (
         <div className="ai-chat-message-actions">
-          {copyLabel && (
-            <button type="button" className="ai-msg-action" onClick={() => { void copy() }}>
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-              <span>{copied ? copiedLabel : copyLabel}</span>
-            </button>
-          )}
-          {onRegenerate && (
-            <button type="button" className="ai-msg-action ai-msg-regenerate" onClick={onRegenerate} disabled={busy}>
-              <RefreshCw size={14} />
-              <span>{regenerateLabel}</span>
-            </button>
-          )}
+          <button type="button" className="ai-msg-action" onClick={() => { void copy() }}>
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            <span>{copied ? copiedLabel : copyLabel}</span>
+          </button>
         </div>
       )}
     </div>

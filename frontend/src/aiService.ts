@@ -3,17 +3,18 @@ import { API_BASE_URL, withAuthHeaders } from './api'
 type Lang = 'kg' | 'ru' | 'en'
 
 type AiRequest = {
-  question: string
+  /** One of the 15 prepared questions (frontend/src/components/aiKeyQuestions.ts). */
+  questionId: string
   language: Lang
-  topic: string
-  history?: Array<{ role: 'user' | 'assistant'; content: string }>
-  /** Replace the previously saved answer to the same question instead of adding a new pair. */
-  regenerate?: boolean
 }
 
-export type AiAnswer = { answer: string; questionId?: string; answerId?: string }
+/** questionMessageId / answerId = ids of the saved chat rows; question = the text in the chosen language. */
+export type AiAnswer = { answer: string; questionId?: string; question?: string; questionMessageId?: string; answerId?: string }
 
-export type SavedAiMessage = { id: string; role: 'user' | 'assistant'; text: string; createdAt?: string }
+export type SavedAiMessage = { id: string; role: 'user' | 'assistant'; text: string; questionId?: string | null; createdAt?: string }
+
+/** One prepared question with its answer from the LevelUp knowledge base. */
+export type KnowledgeItem = { id: string; question: string; answer: string }
 
 export class AiServiceError extends Error {
   status: number
@@ -41,6 +42,16 @@ const AI_ERROR_TEXT: Record<string, Record<Lang, string>> = {
     ru: 'Ассистент не может ответить на этот вопрос. Попробуйте сформулировать иначе.',
     en: 'The assistant cannot answer this question. Please rephrase it.',
   },
+  SERVER_OUTDATED: {
+    kg: 'Серверде AI жардамчынын эски версиясы иштеп жатат. Backend\'ди жаңыртыңыз (deploy), андан кийин кайра аракет кылыңыз.',
+    ru: 'На сервере работает старая версия AI-ассистента. Обновите (задеплойте) backend и попробуйте снова.',
+    en: 'The server runs an old version of the AI assistant. Update (deploy) the backend and try again.',
+  },
+  QUESTION_NOT_ALLOWED: {
+    kg: 'Сураныч, алдын ала даярдалган 15 суроонун бирин тандаңыз. Ассистент тизмедеги атайын суроолорго гана жооп берет.',
+    ru: 'Пожалуйста, выберите один из 15 подготовленных вопросов. Ассистент отвечает только на специальные вопросы из списка.',
+    en: 'Please select one of the 15 prepared questions. The assistant only answers questions from the provided list.',
+  },
   FORBIDDEN: {
     kg: 'AI жардамчы активдүү AI PRO тарифи менен гана жеткиликтүү.',
     ru: 'AI-ассистент доступен только с активным тарифом AI PRO.',
@@ -53,22 +64,24 @@ const AI_ERROR_TEXT: Record<string, Record<Lang, string>> = {
   },
 }
 
-export async function callAiAssistant({ question, language, topic, history = [], regenerate = false }: AiRequest): Promise<AiAnswer> {
+export async function callAiAssistant({ questionId, language }: AiRequest): Promise<AiAnswer> {
   // Always go through our backend: it checks the session and the AI PRO subscription
   // and holds the API key. There is intentionally no direct-to-provider override.
   // Plain fetch: AI errors (502/503 from the provider) must not be auto-retried, every call is billed.
   const response = await fetch(`${API_BASE_URL}/api/ai/chat`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ question, language, topic, history: history.slice(-10), regenerate }),
+    body: JSON.stringify({ questionId, language }),
   })
 
-  const data = await response.json().catch(() => ({})) as { answer?: string; error?: string; code?: string; questionId?: string; answerId?: string }
+  const data = await response.json().catch(() => ({})) as { answer?: string; error?: string; code?: string; questionId?: string; question?: string; questionMessageId?: string; answerId?: string }
 
   if (!response.ok) {
+    // An older backend (before the 15-question version) does not know questionId and answers this.
+    const outdated = response.status === 400 && !data.code && data.error === 'Question is required'
     const key = data.code && AI_ERROR_TEXT[data.code]
       ? data.code
-      : response.status === 403 ? 'FORBIDDEN' : 'GENERIC'
+      : outdated ? 'SERVER_OUTDATED' : response.status === 403 ? 'FORBIDDEN' : 'GENERIC'
     throw new AiServiceError(AI_ERROR_TEXT[key][language], response.status, data.code)
   }
 
@@ -76,7 +89,15 @@ export async function callAiAssistant({ question, language, topic, history = [],
     throw new AiServiceError(AI_ERROR_TEXT.GENERIC[language], 502, 'AI_EMPTY')
   }
 
-  return { answer: data.answer, questionId: data.questionId, answerId: data.answerId }
+  return { answer: data.answer, questionId: data.questionId, question: data.question, questionMessageId: data.questionMessageId, answerId: data.answerId }
+}
+
+/** The 15 prepared questions with their answers in one language (AI Pro only, checked by the server). */
+export async function fetchAiKnowledge(language: Lang): Promise<KnowledgeItem[]> {
+  const response = await fetch(`${API_BASE_URL}/api/ai/knowledge?language=${encodeURIComponent(language)}`, { headers: withAuthHeaders() })
+  if (!response.ok) throw new AiServiceError('knowledge', response.status)
+  const data = await response.json() as { items?: KnowledgeItem[] }
+  return Array.isArray(data.items) ? data.items : []
 }
 
 /** The signed-in user's saved conversation (server-side, survives logout and other devices). */

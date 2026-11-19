@@ -1,7 +1,7 @@
-import { Atom, Braces, Brackets, Brain, CodeXml, Component, Cpu, FileCode, Globe, LayoutGrid, Palette, Plug, SquareFunction, Tags, Variable, type LucideIcon } from 'lucide-react'
+import { Atom, Braces, Brain, Component, FileCode, GitBranch, Globe, Layers, Monitor, Palette, Rocket, SquareFunction, Variable, Workflow, Zap, type LucideIcon } from 'lucide-react'
 import type { Lang } from '../appShared'
 
-export type AiCategory = 'html' | 'css' | 'javascript' | 'react' | 'ai' | 'python'
+export type AiCategory = 'html-css' | 'javascript' | 'react' | 'tools' | 'ai' | 'basics'
 
 export type AiKeyQuestion = {
   id: string
@@ -10,93 +10,109 @@ export type AiKeyQuestion = {
   text: Record<Lang, string>
 }
 
-/** Category order and labels (technology names are the same in every language, AI is translated). */
 export const AI_CATEGORIES: Array<{ id: AiCategory; label: Record<Lang, string> }> = [
-  { id: 'html', label: { kg: 'HTML', ru: 'HTML', en: 'HTML' } },
-  { id: 'css', label: { kg: 'CSS', ru: 'CSS', en: 'CSS' } },
+  { id: 'html-css', label: { kg: 'HTML / CSS', ru: 'HTML / CSS', en: 'HTML / CSS' } },
   { id: 'javascript', label: { kg: 'JavaScript', ru: 'JavaScript', en: 'JavaScript' } },
   { id: 'react', label: { kg: 'React', ru: 'React', en: 'React' } },
+  { id: 'tools', label: { kg: 'Куралдар', ru: 'Инструменты', en: 'Tools' } },
   { id: 'ai', label: { kg: 'Жасалма интеллект', ru: 'ИИ', en: 'AI' } },
-  { id: 'python', label: { kg: 'Python', ru: 'Python', en: 'Python' } },
+  { id: 'basics', label: { kg: 'Негиздер', ru: 'Основы', en: 'Basics' } },
 ]
 
 /**
- * The 15 key questions of the AI assistant. Clicking one sends its text (in the current
- * language) to the real AI backend; no answer is stored here.
+ * The ONLY 15 questions the AI assistant answers. The backend keeps the same list
+ * (backend/src/aiQuestions.js) and refuses any other text; the test suite checks both lists match.
  */
 export const AI_KEY_QUESTIONS: AiKeyQuestion[] = [
-  { id: 'html-what', category: 'html', icon: FileCode, text: {
+  { id: 'html-what', category: 'html-css', icon: FileCode, text: {
     kg: 'HTML деген эмне жана ал эмне үчүн керек?',
     ru: 'Что такое HTML и для чего он нужен?',
     en: 'What is HTML and what is it used for?' } },
-  { id: 'html-tags', category: 'html', icon: Tags, text: {
-    kg: 'Жаңы баштаган адам кайсы негизги HTML тегдерин билиши керек?',
-    ru: 'Какие основные HTML-теги должен знать начинающий?',
-    en: 'Which basic HTML tags should a beginner know?' } },
-  { id: 'css-what', category: 'css', icon: Palette, text: {
-    kg: 'CSS деген эмне жана ал кантип иштейт?',
-    ru: 'Что такое CSS и как он работает?',
-    en: 'What is CSS and how does it work?' } },
-  { id: 'css-flex-grid', category: 'css', icon: LayoutGrid, text: {
-    kg: 'Flexbox менен Grid\'дин айырмасы эмнеде?',
-    ru: 'В чём разница между Flexbox и Grid?',
-    en: 'What is the difference between Flexbox and Grid?' } },
+  { id: 'css-what', category: 'html-css', icon: Palette, text: {
+    kg: 'CSS деген эмне?',
+    ru: 'Что такое CSS?',
+    en: 'What is CSS?' } },
+  { id: 'html-vs-css', category: 'html-css', icon: Layers, text: {
+    kg: 'HTML менен CSS\'тин айырмасы эмнеде?',
+    ru: 'В чём разница между HTML и CSS?',
+    en: 'What is the difference between HTML and CSS?' } },
   { id: 'js-what', category: 'javascript', icon: Braces, text: {
     kg: 'JavaScript деген эмне?',
     ru: 'Что такое JavaScript?',
     en: 'What is JavaScript?' } },
-  { id: 'js-variables', category: 'javascript', icon: Variable, text: {
-    kg: 'Өзгөрмөлөр деген эмне жана алардын кандай түрлөрү бар?',
-    ru: 'Что такое переменные и какие их типы существуют?',
-    en: 'What are variables and what types of them exist?' } },
-  { id: 'js-functions', category: 'javascript', icon: SquareFunction, text: {
-    kg: 'JavaScript\'теги функциялар деген эмне?',
-    ru: 'Что такое функции в JavaScript?',
-    en: 'What are functions in JavaScript?' } },
-  { id: 'js-arrays', category: 'javascript', icon: Brackets, text: {
-    kg: 'Массивдер жана объекттер деген эмне?',
-    ru: 'Что такое массивы и объекты?',
-    en: 'What are arrays and objects?' } },
+  { id: 'js-variable', category: 'javascript', icon: Variable, text: {
+    kg: 'JavaScript\'теги өзгөрмө деген эмне?',
+    ru: 'Что такое переменная в JavaScript?',
+    en: 'What is a variable in JavaScript?' } },
+  { id: 'js-function', category: 'javascript', icon: SquareFunction, text: {
+    kg: 'Функция деген эмне?',
+    ru: 'Что такое функция?',
+    en: 'What is a function?' } },
   { id: 'react-what', category: 'react', icon: Atom, text: {
-    kg: 'React деген эмне жана ал эмне үчүн колдонулат?',
-    ru: 'Что такое React и для чего он используется?',
-    en: 'What is React and what is it used for?' } },
-  { id: 'react-components', category: 'react', icon: Component, text: {
-    kg: 'React\'теги компоненттер деген эмне?',
-    ru: 'Что такое компоненты в React?',
-    en: 'What are components in React?' } },
-  { id: 'js-api', category: 'javascript', icon: Plug, text: {
-    kg: 'API деген эмне жана аны менен кантип иштөө керек?',
-    ru: 'Что такое API и как с ним работать?',
-    en: 'What is an API and how do you work with it?' } },
+    kg: 'React деген эмне?',
+    ru: 'Что такое React?',
+    en: 'What is React?' } },
+  { id: 'react-component', category: 'react', icon: Component, text: {
+    kg: 'React\'теги компонент деген эмне?',
+    ru: 'Что такое компонент в React?',
+    en: 'What is a component in React?' } },
+  { id: 'vite-what', category: 'tools', icon: Zap, text: {
+    kg: 'Vite деген эмне?',
+    ru: 'Что такое Vite?',
+    en: 'What is Vite?' } },
+  { id: 'git-github', category: 'tools', icon: GitBranch, text: {
+    kg: 'Git жана GitHub деген эмне?',
+    ru: 'Что такое Git и GitHub?',
+    en: 'What are Git and GitHub?' } },
   { id: 'ai-what', category: 'ai', icon: Brain, text: {
     kg: 'Жасалма интеллект деген эмне?',
     ru: 'Что такое искусственный интеллект?',
     en: 'What is artificial intelligence?' } },
-  { id: 'ai-ml', category: 'ai', icon: Cpu, text: {
-    kg: 'Машиналык үйрөнүү кантип иштейт?',
-    ru: 'Как работает машинное обучение?',
-    en: 'How does machine learning work?' } },
-  { id: 'python-what', category: 'python', icon: CodeXml, text: {
-    kg: 'Python деген эмне жана ал кайда колдонулат?',
-    ru: 'Что такое Python и где он применяется?',
-    en: 'What is Python and where is it used?' } },
-  { id: 'html-first-site', category: 'html', icon: Globe, text: {
+  { id: 'algorithm', category: 'basics', icon: Workflow, text: {
+    kg: 'Алгоритм деген эмне?',
+    ru: 'Что такое алгоритм?',
+    en: 'What is an algorithm?' } },
+  { id: 'frontend', category: 'basics', icon: Monitor, text: {
+    kg: 'Frontend-иштеп чыгуу деген эмне?',
+    ru: 'Что такое frontend-разработка?',
+    en: 'What is frontend development?' } },
+  { id: 'first-site', category: 'basics', icon: Globe, text: {
     kg: 'Биринчи веб-сайтымды кантип түзсөм болот?',
     ru: 'Как создать свой первый веб-сайт?',
     en: 'How do I create my first website?' } },
+  { id: 'start-programming', category: 'basics', icon: Rocket, text: {
+    kg: 'Программалоону үйрөнүүнү эмнеден баштоо керек?',
+    ru: 'С чего начать изучение программирования?',
+    en: 'Where should I start learning programming?' } },
 ]
+
+/** Same rules as the backend: case, spaces, quotes, final punctuation, ё/е do not matter. */
+export function normalizeQuestion(value: string): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[’‘`ʼ]/g, "'")
+    .replace(/[«»"“”]/g, '')
+    .replace(/[\s ]+/g, ' ')
+    .replace(/[\s?!.。…]+$/u, '')
+    .trim()
+}
+
+/** The prepared question a typed text corresponds to (any of the 3 languages), or undefined. */
+export function findKeyQuestion(text: string): AiKeyQuestion | undefined {
+  const needle = normalizeQuestion(text)
+  if (!needle) return undefined
+  return AI_KEY_QUESTIONS.find((q) => Object.values(q.text).some((t) => normalizeQuestion(t) === needle))
+}
 
 /** Interface texts of the AI assistant that are not in the shared site translations. */
 export const AI_UI: Record<Lang, {
   keyQuestions: string
   keyQuestionsHint: string
   all: string
-  show: string
-  hide: string
   clearHistory: string
   clearConfirm: string
-  regenerate: string
+  copyCode: string
   copy: string
   copied: string
   thinking: string
@@ -108,68 +124,82 @@ export const AI_UI: Record<Lang, {
   cancel: string
   deleteItem: string
   questionsCount: string
+  notAllowed: string
+  backToQuestions: string
+  onlyListHint: string
+  answerTitle: string
+  placeholder: string
 }> = {
   kg: {
     keyQuestions: 'Негизги суроолор',
-    keyQuestionsHint: 'Суроону тандаңыз — AI аны дароо талдап, толук жооп берет.',
+    keyQuestionsHint: 'Суроону тандаңыз — ассистент мисалдары менен толук жооп берет.',
     all: 'Баары',
-    show: 'Көрсөтүү',
-    hide: 'Жашыруу',
     clearHistory: 'Тарыхты тазалоо',
     clearConfirm: 'Бүт чат тарыхын өчүрөсүзбү?',
-    regenerate: 'Жоопту кайра түзүү',
+    copyCode: 'Кодду көчүрүү',
     copy: 'Көчүрүү',
     copied: 'Көчүрүлдү',
     thinking: 'AI ойлонуп жатат...',
     send: 'Жөнөтүү',
     lockedTitle: 'AI Pro менен суроо бериңиз',
-    lockedText: 'Бул 15 суроого жана каалаган башка суроого AI жардамчынын толук жообун алуу үчүн AI Pro тарифин туташтырыңыз.',
+    lockedText: 'Бул 15 суроого мисалдары бар толук жоопторду алуу үчүн AI Pro тарифин туташтырыңыз.',
     historyError: 'Чат тарыхын жүктөө мүмкүн болгон жок.',
     confirmDelete: 'Өчүрүү',
     cancel: 'Жокко чыгаруу',
     deleteItem: 'Суроону тарыхтан өчүрүү',
     questionsCount: 'суроо',
+    notAllowed: 'Сураныч, алдын ала даярдалган 15 суроонун бирин тандаңыз. Ассистент тизмедеги атайын суроолорго гана жооп берет.',
+    backToQuestions: 'Суроолорго кайтуу',
+    onlyListHint: 'Ассистент тизмедеги 15 суроого гана жооп берет. Суроону тандаңыз же анын текстин так жазыңыз.',
+    answerTitle: 'AI жообу',
+    placeholder: 'Тизмеден суроону жазыңыз же жогорудан тандаңыз…',
   },
   ru: {
     keyQuestions: 'Ключевые вопросы',
-    keyQuestionsHint: 'Выберите вопрос — ИИ сразу разберёт его и даст подробный ответ.',
+    keyQuestionsHint: 'Выберите вопрос — ассистент даст подробный ответ с примерами.',
     all: 'Все',
-    show: 'Показать',
-    hide: 'Скрыть',
     clearHistory: 'Очистить историю',
     clearConfirm: 'Удалить всю историю чата?',
-    regenerate: 'Сгенерировать заново',
+    copyCode: 'Копировать код',
     copy: 'Копировать',
     copied: 'Скопировано',
     thinking: 'ИИ думает...',
     send: 'Отправить',
     lockedTitle: 'Задавайте вопросы с AI Pro',
-    lockedText: 'Подключите тариф AI Pro, чтобы получать подробные ответы ИИ на эти 15 вопросов и любые другие.',
+    lockedText: 'Подключите тариф AI Pro, чтобы получить подробные ответы с примерами на эти 15 вопросов.',
     historyError: 'Не удалось загрузить историю чата.',
     confirmDelete: 'Удалить',
     cancel: 'Отмена',
     deleteItem: 'Удалить вопрос из истории',
     questionsCount: 'вопросов',
+    notAllowed: 'Пожалуйста, выберите один из 15 подготовленных вопросов. Ассистент отвечает только на специальные вопросы из списка.',
+    backToQuestions: 'Назад к вопросам',
+    onlyListHint: 'Ассистент отвечает только на 15 вопросов из списка. Выберите вопрос или введите его текст точно.',
+    answerTitle: 'Ответ ИИ',
+    placeholder: 'Введите вопрос из списка или выберите его выше…',
   },
   en: {
     keyQuestions: 'Key questions',
-    keyQuestionsHint: 'Pick a question — the AI will break it down and give a detailed answer.',
+    keyQuestionsHint: 'Pick a question — the assistant gives a detailed answer with examples.',
     all: 'All',
-    show: 'Show',
-    hide: 'Hide',
     clearHistory: 'Clear history',
     clearConfirm: 'Delete the whole chat history?',
-    regenerate: 'Regenerate answer',
+    copyCode: 'Copy code',
     copy: 'Copy',
     copied: 'Copied',
     thinking: 'AI is thinking...',
     send: 'Send',
     lockedTitle: 'Ask questions with AI Pro',
-    lockedText: 'Connect the AI Pro plan to get detailed AI answers to these 15 questions and any others.',
+    lockedText: 'Connect the AI Pro plan to get detailed answers with examples to these 15 questions.',
     historyError: 'Could not load the chat history.',
     confirmDelete: 'Delete',
     cancel: 'Cancel',
     deleteItem: 'Delete question from history',
     questionsCount: 'questions',
+    notAllowed: 'Please select one of the 15 prepared questions. The assistant only answers questions from the provided list.',
+    backToQuestions: 'Back to questions',
+    onlyListHint: 'The assistant only answers the 15 questions from the list. Pick a question or type its exact text.',
+    answerTitle: 'AI answer',
+    placeholder: 'Type a question from the list or pick one above…',
   },
 }

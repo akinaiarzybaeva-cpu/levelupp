@@ -466,3 +466,10 @@
 
 /* Header link icons are a Light Mode element; Dark Mode keeps its text-only links. */
 :root[data-theme='dark'] .nav-item-icon { display: none; }
+
+/* AI assistant: chat history items in the light theme */
+:root:not([data-theme='dark']) .ai-chat-history-item { background: var(--lu-surface); border-color: var(--lu-line); }
+:root:not([data-theme='dark']) .ai-chat-history-item-main strong { color: var(--lu-ink); }
+:root:not([data-theme='dark']) .ai-chat-history-item-main span,
+:root:not([data-theme='dark']) .ai-chat-history-item-main svg { color: var(--lu-ink-muted); }
+:root:not([data-theme='dark']) .ai-chat-history-remove { border-color: var(--lu-line); color: var(--lu-ink-muted); background: transparent; }

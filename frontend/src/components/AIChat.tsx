@@ -1,32 +1,32 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, Clock3, Lock, MessageSquareText, Plus, SendHorizonal, Sparkles, Trash2 } from 'lucide-react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, Clock3, Info, Lock, MessageSquareText, Plus, SendHorizonal, Sparkles, Trash2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { callAiAssistant, clearAiHistory, deleteAiExchange, fetchAiHistory } from '../aiService'
+import { AiServiceError, callAiAssistant, clearAiHistory, deleteAiExchange, fetchAiHistory, fetchAiKnowledge, type KnowledgeItem } from '../aiService'
 import siteLogo from '../assets/logo.webp'
 import { type UserSubscription } from '../subscriptionService'
-import { translations, hasActiveAiAccess, type Lang, type Message } from '../appShared'
+import { translations, hasActiveAiAccess, LanguageSetterContext, type Lang, type Message } from '../appShared'
+import LanguageSwitcher from './LanguageSwitcher'
 import AIMessage from './AIMessage'
-import { AI_CATEGORIES, AI_KEY_QUESTIONS, AI_UI, type AiCategory } from './aiKeyQuestions'
+import { AI_CATEGORIES, AI_KEY_QUESTIONS, AI_UI, findKeyQuestion, type AiCategory } from './aiKeyQuestions'
 
-/** Kept for backwards compatibility: the first suggestions are now the 15 key questions. */
+/** Kept for backwards compatibility: the suggestions are the 15 prepared questions. */
 export const aiSuggestions: Record<Lang, string[]> = {
   kg: AI_KEY_QUESTIONS.map((q) => q.text.kg),
   ru: AI_KEY_QUESTIONS.map((q) => q.text.ru),
   en: AI_KEY_QUESTIONS.map((q) => q.text.en),
 }
 
-type ChatMessage = Message & { createdAt?: string }
+type ChatMessage = Message & { createdAt?: string; questionId?: string | null }
+type View = 'questions' | 'answer'
 
 const LOCALES: Record<Lang, string> = { kg: 'ky-KG', ru: 'ru-RU', en: 'en-US' }
 
-function KeyQuestions({ language, locked, disabled, pricingPath, onAsk, open, onToggle }: {
+function KeyQuestions({ language, locked, disabled, pricingPath, onAsk }: {
   language: Lang
   locked: boolean
   disabled: boolean
   pricingPath: string
-  onAsk: (text: string) => void
-  open: boolean
-  onToggle: () => void
+  onAsk: (questionId: string) => void
 }) {
   const ui = AI_UI[language]
   const [category, setCategory] = useState<AiCategory | 'all'>('all')
@@ -34,51 +34,45 @@ function KeyQuestions({ language, locked, disabled, pricingPath, onAsk, open, on
   const labelOf = (id: AiCategory) => AI_CATEGORIES.find((c) => c.id === id)?.label[language] ?? id
 
   return (
-    <section className={`ai-key-questions${open ? ' is-open' : ''}`} aria-label={ui.keyQuestions}>
-      <button type="button" className="ai-key-head" onClick={onToggle} aria-expanded={open}>
+    <section className="ai-key-questions is-open" aria-label={ui.keyQuestions}>
+      <div className="ai-key-head">
         <span className="ai-key-title">
           <Sparkles size={16} />
           <strong>{ui.keyQuestions}</strong>
           <span className="ai-key-count">{AI_KEY_QUESTIONS.length} {ui.questionsCount}</span>
         </span>
-        <span className="ai-key-toggle">{open ? ui.hide : ui.show}<ChevronDown size={16} /></span>
-      </button>
-
-      {open && (
-        <>
-          <p className="ai-key-hint">{locked ? ui.lockedText : ui.keyQuestionsHint}</p>
-          <div className="ai-key-cats" role="tablist">
-            <button type="button" role="tab" aria-selected={category === 'all'} className={category === 'all' ? 'active' : ''} onClick={() => setCategory('all')}>{ui.all}</button>
-            {AI_CATEGORIES.map((c) => (
-              <button key={c.id} type="button" role="tab" aria-selected={category === c.id} className={category === c.id ? `active cat-${c.id}` : `cat-${c.id}`} onClick={() => setCategory(c.id)}>
-                {c.label[language]}
-              </button>
-            ))}
-          </div>
-          <div className="ai-key-grid">
-            {visible.map((q) => {
-              const Icon = q.icon
-              const body = (
-                <>
-                  <span className={`ai-key-icon cat-${q.category}`}><Icon size={17} /></span>
-                  <span className="ai-key-text">
-                    <small>{labelOf(q.category)}</small>
-                    <span>{q.text[language]}</span>
-                  </span>
-                  {locked && <Lock size={14} className="ai-key-lock" />}
-                </>
-              )
-              return locked ? (
-                <Link key={q.id} to={pricingPath} className="ai-key-card locked" data-question-id={q.id}>{body}</Link>
-              ) : (
-                <button key={q.id} type="button" className="ai-key-card" data-question-id={q.id} disabled={disabled} onClick={() => onAsk(q.text[language])}>
-                  {body}
-                </button>
-              )
-            })}
-          </div>
-        </>
-      )}
+      </div>
+      <p className="ai-key-hint">{locked ? ui.lockedText : ui.keyQuestionsHint}</p>
+      <div className="ai-key-cats" role="tablist">
+        <button type="button" role="tab" aria-selected={category === 'all'} className={category === 'all' ? 'active' : ''} onClick={() => setCategory('all')}>{ui.all}</button>
+        {AI_CATEGORIES.map((c) => (
+          <button key={c.id} type="button" role="tab" aria-selected={category === c.id} className={category === c.id ? 'active' : ''} onClick={() => setCategory(c.id)}>
+            {c.label[language]}
+          </button>
+        ))}
+      </div>
+      <div className="ai-key-grid">
+        {visible.map((q) => {
+          const Icon = q.icon
+          const body = (
+            <>
+              <span className={`ai-key-icon cat-${q.category}`}><Icon size={17} /></span>
+              <span className="ai-key-text">
+                <small>{labelOf(q.category)}</small>
+                <span>{q.text[language]}</span>
+              </span>
+              {locked && <Lock size={14} className="ai-key-lock" />}
+            </>
+          )
+          return locked ? (
+            <Link key={q.id} to={pricingPath} className="ai-key-card locked" data-question-id={q.id}>{body}</Link>
+          ) : (
+            <button key={q.id} type="button" className="ai-key-card" data-question-id={q.id} disabled={disabled} onClick={() => onAsk(q.id)}>
+              {body}
+            </button>
+          )
+        })}
+      </div>
     </section>
   )
 }
@@ -87,18 +81,22 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
   const t = translations[language]
   const ui = AI_UI[language]
   const isAiUnlocked = hasActiveAiAccess(subscription)
+  const setLanguage = useContext(LanguageSetterContext)
+  const languageLabel = language === 'kg' ? 'Тил' : language === 'ru' ? 'Язык' : 'Language'
   const listRef = useRef<HTMLDivElement | null>(null)
+  const mainRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [regeneratingId, setRegeneratingId] = useState<string | null>(null)
+  // Knowledge base per language (question + answer by id), loaded from the server for AI Pro users.
+  const [knowledge, setKnowledge] = useState<Partial<Record<Lang, Record<string, KnowledgeItem>>>>({})
   const [error, setError] = useState<string | null>(null)
+  const [notAllowed, setNotAllowed] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [historyLoaded, setHistoryLoaded] = useState(false)
   const [historyFailed, setHistoryFailed] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
-  const [questionsOpen, setQuestionsOpen] = useState(true)
-  const welcomeMessage = useMemo<ChatMessage>(() => ({ id: 'welcome', role: 'assistant', text: t.ai.welcome }), [t.ai.welcome])
+  const [view, setView] = useState<View>('questions')
 
   // Saved conversation of the signed-in user (stored on the server, not in the browser).
   useEffect(() => {
@@ -110,90 +108,95 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
       setHistoryLoaded(true)
       return
     }
-    // Older versions kept the chat in localStorage; the server is the source of truth now.
     try { window.localStorage.removeItem(`levelup-ai-chat-history:${userEmail}`) } catch { /* storage unavailable */ }
     fetchAiHistory()
-      .then((saved) => {
-        if (cancelled) return
-        setMessages(saved.map((m) => ({ id: m.id, role: m.role, text: m.text, createdAt: m.createdAt })))
-        if (saved.length > 0) setQuestionsOpen(false)
-      })
+      .then((saved) => { if (!cancelled) setMessages(saved.map((m) => ({ id: m.id, role: m.role, text: m.text, createdAt: m.createdAt, questionId: m.questionId ?? null }))) })
       .catch(() => { if (!cancelled) setHistoryFailed(true) })
       .finally(() => { if (!cancelled) setHistoryLoaded(true) })
     return () => { cancelled = true }
   }, [userEmail])
 
-  // Keep the newest message (or the "thinking" indicator) in view.
+  // Switching the site language shows the questions AND the already opened answers in that language.
+  const knowledgeLoaded = Boolean(knowledge[language])
+  useEffect(() => {
+    if (!isAiUnlocked || knowledgeLoaded) return
+    let cancelled = false
+    fetchAiKnowledge(language)
+      .then((items) => { if (!cancelled) setKnowledge((current) => ({ ...current, [language]: Object.fromEntries(items.map((item) => [item.id, item])) })) })
+      .catch(() => { /* saved texts are shown as they are */ })
+    return () => { cancelled = true }
+  }, [isAiUnlocked, language, knowledgeLoaded])
+
+  const displayText = (message: ChatMessage) => {
+    const item = message.questionId ? knowledge[language]?.[message.questionId] : undefined
+    if (!item) return message.text
+    return message.role === 'user' ? item.question : item.answer
+  }
+
+  // Keep the newest answer (or the "thinking" indicator) in view.
   useEffect(() => {
     const list = listRef.current
-    if (!list || !historyLoaded) return
+    if (!list || !historyLoaded || view !== 'answer') return
     list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' })
-  }, [messages, isLoading, historyLoaded])
+  }, [messages, isLoading, historyLoaded, view])
 
-  const toHistory = (items: ChatMessage[]) => items.map((m) => ({ role: m.role, content: m.text }))
+  const scrollMainIntoView = () => window.setTimeout(() => mainRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30)
 
-  const sendQuestion = async (question: string) => {
-    const trimmed = question.trim()
-    if (!trimmed || isLoading || !isAiUnlocked) return
+  const showNotAllowed = () => {
+    setNotAllowed(true)
+    setView('questions')
+    scrollMainIntoView()
+  }
+
+  const ask = async (questionId: string) => {
+    if (isLoading || !isAiUnlocked) return
+    const question = AI_KEY_QUESTIONS.find((q) => q.id === questionId)
+    if (!question) { showNotAllowed(); return }
 
     setError(null)
+    setNotAllowed(false)
     setConfirmClear(false)
-    const previous = messages
-    const tempId = `pending-${Date.now()}`
-    setMessages((current) => [...current, { id: tempId, role: 'user', text: trimmed, createdAt: new Date().toISOString() }])
-    setInput('')
+    setView('answer')
     setIsLoading(true)
+    const tempId = `pending-${Date.now()}`
+    setMessages((current) => [...current, { id: tempId, role: 'user', text: question.text[language], questionId, createdAt: new Date().toISOString() }])
 
     try {
-      const result = await callAiAssistant({ question: trimmed, language, topic: 'general programming', history: toHistory(previous) })
-      setMessages((current) => [
-        ...current.map((m) => (m.id === tempId ? { ...m, id: result.questionId ?? tempId } : m)),
-        { id: result.answerId ?? `${Date.now()}-ai`, role: 'assistant', text: result.answer, createdAt: new Date().toISOString() },
-      ])
+      // The server checks the id and returns the prepared answer from the LevelUp knowledge base.
+      const result = await callAiAssistant({ questionId, language })
+      const answer: ChatMessage = { id: result.answerId ?? `${Date.now()}-ai`, role: 'assistant', text: result.answer, questionId: result.questionId ?? questionId, createdAt: new Date().toISOString() }
+      setMessages((current) => [...current.map((m) => (m.id === tempId ? { ...m, id: result.questionMessageId ?? tempId, text: result.question ?? m.text } : m)), answer])
     } catch (err) {
-      // The question was not answered (and not saved): take it back into the input field.
       setMessages((current) => current.filter((m) => m.id !== tempId))
-      setInput(trimmed)
-      setError(err instanceof Error ? err.message : t.generic.error)
+      if (err instanceof AiServiceError && err.code === 'QUESTION_NOT_ALLOWED') showNotAllowed()
+      else setError(err instanceof Error ? err.message : t.generic.error)
     } finally {
       setIsLoading(false)
-      inputRef.current?.focus()
     }
   }
 
-  const regenerate = async (answerId: string) => {
-    if (isLoading || !isAiUnlocked) return
-    const index = messages.findIndex((m) => m.id === answerId)
-    const question = index > 0 ? messages[index - 1] : undefined
-    if (!question || question.role !== 'user') return
-
-    setError(null)
-    setIsLoading(true)
-    setRegeneratingId(answerId)
-    try {
-      const result = await callAiAssistant({ question: question.text, language, topic: 'general programming', history: toHistory(messages.slice(0, index - 1)), regenerate: true })
-      setMessages((current) => current.map((m) => {
-        if (m.id === answerId) return { id: result.answerId ?? `${Date.now()}-ai`, role: 'assistant', text: result.answer, createdAt: new Date().toISOString() }
-        if (m.id === question.id && result.questionId) return { ...m, id: result.questionId }
-        return m
-      }))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t.generic.error)
-    } finally {
-      setIsLoading(false)
-      setRegeneratingId(null)
+  // Typed text is answered only when it IS one of the 15 questions; anything else gets the notice.
+  const submitTyped = () => {
+    const text = input.trim()
+    if (!text || isLoading) return
+    const match = findKeyQuestion(text)
+    setInput('')
+    if (!match) {
+      showNotAllowed()
+      return
     }
+    void ask(match.id)
   }
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault()
-    void sendQuestion(input)
+    submitTyped()
   }
 
   const handleInputKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
     event.preventDefault()
-    if (!isLoading) void sendQuestion(input)
+    submitTyped()
   }
 
   const clearChat = async () => {
@@ -203,7 +206,7 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
       if (userEmail) await clearAiHistory()
       setMessages([])
       setInput('')
-      setQuestionsOpen(true)
+      setView('questions')
     } catch {
       setError(t.generic.error)
     }
@@ -235,8 +238,19 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
   }, [language])
 
   const userInitial = (userEmail?.trim()?.charAt(0) || 'U').toUpperCase()
-  const lastAssistantId = [...messages].reverse().find((m) => m.role === 'assistant')?.id
-  const shown: ChatMessage[] = [welcomeMessage, ...messages]
+
+  const hero = (text: string) => (
+    <div className="ai-chat-hero">
+      <div className="ai-chat-hero-top">
+        <div className="ai-chat-lang"><LanguageSwitcher language={language} setLanguage={setLanguage} label={languageLabel} /></div>
+        <span className="ai-chat-pro-badge"><Sparkles size={14} />AI Pro</span>
+        <span className="ai-chat-user-avatar">{userInitial}</span>
+      </div>
+      <h2>{t.ai.title}</h2>
+      <p>{text}</p>
+      <div className="ai-chat-access-pill"><Sparkles size={15} />{t.ai.accessLabel}</div>
+    </div>
+  )
 
   if (!isAiUnlocked) {
     return (
@@ -258,16 +272,8 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
         </aside>
 
         <div className="ai-chat-main">
-          <div className="ai-chat-hero">
-            <div className="ai-chat-hero-top">
-              <span className="ai-chat-pro-badge"><Sparkles size={14} />AI Pro</span>
-              <span className="ai-chat-user-avatar">{userInitial}</span>
-            </div>
-            <h2>{t.ai.title}</h2>
-            <p>{t.ai.blocked}</p>
-            <div className="ai-chat-access-pill"><Sparkles size={15} />{t.ai.accessLabel}</div>
-          </div>
-          <KeyQuestions language={language} locked disabled pricingPath={pricingPath} onAsk={() => undefined} open onToggle={() => undefined} />
+          {hero(t.ai.blocked)}
+          <KeyQuestions language={language} locked disabled pricingPath={pricingPath} onAsk={() => undefined} />
           <div className="ai-chat-locked-actions">
             <Link to={pricingPath} className="btn btn-primary">{t.ai.connectPlan}</Link>
           </div>
@@ -282,7 +288,7 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
         <Link className="ai-chat-brand" to="/dashboard">
           <img src={siteLogo} alt="LevelUp" className="ai-chat-brand-logo" />
         </Link>
-        <button type="button" className="ai-chat-new-btn" onClick={() => (messages.length ? setConfirmClear(true) : setQuestionsOpen(true))} disabled={isLoading}>
+        <button type="button" className="ai-chat-new-btn" onClick={() => { setNotAllowed(false); setView('questions'); if (messages.length) setConfirmClear(true) }} disabled={isLoading}>
           <MessageSquareText size={18} />
           <span>{t.ai.newChat}</span>
           <Plus size={16} />
@@ -298,13 +304,13 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
           ) : (
             historyItems.map((message) => (
               <article key={message.id} className="ai-chat-history-item">
-                <div className="ai-chat-history-item-main">
+                <button type="button" className="ai-chat-history-item-main ai-chat-history-open" onClick={() => setView('answer')}>
                   <MessageSquareText size={14} />
                   <div>
-                    <strong>{message.text.slice(0, 38)}{message.text.length > 38 ? '…' : ''}</strong>
+                    <strong>{displayText(message).slice(0, 38)}{displayText(message).length > 38 ? '…' : ''}</strong>
                     <span>{formatTime(message)}</span>
                   </div>
-                </div>
+                </button>
                 <button type="button" className="ai-chat-history-remove" onClick={() => { void removeHistoryItem(message.id) }} disabled={isLoading} aria-label={ui.deleteItem} title={ui.deleteItem}>
                   <Trash2 size={14} />
                 </button>
@@ -314,60 +320,70 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
         </div>
       </aside>
 
-      <div className="ai-chat-main">
-        <div className="ai-chat-hero">
-          <div className="ai-chat-hero-top">
-            <span className="ai-chat-pro-badge"><Sparkles size={14} />AI Pro</span>
-            <span className="ai-chat-user-avatar">{userInitial}</span>
-          </div>
-          <h2>{t.ai.title}</h2>
-          <p>{t.ai.welcome}</p>
-          <div className="ai-chat-access-pill"><Sparkles size={15} />{t.ai.accessLabel}</div>
-        </div>
+      <div className="ai-chat-main" ref={mainRef}>
+        {hero(t.ai.welcome)}
 
-        <KeyQuestions
-          language={language}
-          locked={false}
-          disabled={isLoading}
-          pricingPath={pricingPath}
-          onAsk={(text) => { void sendQuestion(text) }}
-          open={questionsOpen}
-          onToggle={() => setQuestionsOpen((v) => !v)}
-        />
+        {view === 'questions' ? (
+          <>
+            {notAllowed && (
+              <div className="ai-not-allowed" role="alert">
+                <Info size={18} />
+                <p>{ui.notAllowed}</p>
+              </div>
+            )}
+            <KeyQuestions language={language} locked={false} disabled={isLoading} pricingPath={pricingPath} onAsk={(id) => { void ask(id) }} />
+            {messages.length > 0 && (
+              <button type="button" className="ai-msg-action ai-open-answers" onClick={() => setView('answer')}>
+                <MessageSquareText size={14} /><span>{ui.answerTitle} · {messages.filter((m) => m.role === 'assistant').length}</span>
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="ai-chat-toolbar">
+              <button type="button" className="ai-back-btn" onClick={() => { setView('questions'); setNotAllowed(false) }}>
+                <ArrowLeft size={16} /><span>{ui.backToQuestions}</span>
+              </button>
+              {confirmClear ? (
+                <span className="ai-chat-confirm" role="alert">
+                  <span>{ui.clearConfirm}</span>
+                  <button type="button" className="ai-msg-action danger" onClick={() => { void clearChat() }}>{ui.confirmDelete}</button>
+                  <button type="button" className="ai-msg-action" onClick={() => setConfirmClear(false)}>{ui.cancel}</button>
+                </span>
+              ) : (
+                <button type="button" className="ai-msg-action" onClick={() => setConfirmClear(true)} disabled={isLoading || messages.length === 0}>
+                  <Trash2 size={14} /><span>{ui.clearHistory}</span>
+                </button>
+              )}
+            </div>
 
-        <div className="ai-chat-toolbar">
-          <span>{t.ai.history}{messages.length > 0 ? ` · ${messages.filter((m) => m.role === 'user').length}` : ''}</span>
-          {confirmClear ? (
+            <div className="ai-chat-history ai-answer-block" ref={listRef} aria-live="polite" aria-label={ui.answerTitle}>
+              {messages.map((message) => (
+                <AIMessage
+                  key={message.id}
+                  role={message.role}
+                  text={displayText(message)}
+                  userLabel={userInitial}
+                  copyLabel={ui.copy}
+                  copiedLabel={ui.copied}
+                  copyCodeLabel={ui.copyCode}
+                />
+              ))}
+              {isLoading && <AIMessage role="assistant" text={ui.thinking} loading />}
+            </div>
+          </>
+        )}
+
+        {/* The confirmation is also reachable from "New chat" while the questions are shown. */}
+        {view === 'questions' && confirmClear && (
+          <div className="ai-chat-toolbar">
             <span className="ai-chat-confirm" role="alert">
               <span>{ui.clearConfirm}</span>
               <button type="button" className="ai-msg-action danger" onClick={() => { void clearChat() }}>{ui.confirmDelete}</button>
               <button type="button" className="ai-msg-action" onClick={() => setConfirmClear(false)}>{ui.cancel}</button>
             </span>
-          ) : (
-            <button type="button" className="ai-msg-action" onClick={() => setConfirmClear(true)} disabled={isLoading || messages.length === 0}>
-              <Trash2 size={14} /><span>{ui.clearHistory}</span>
-            </button>
-          )}
-        </div>
-
-        <div className="ai-chat-history" ref={listRef} aria-live="polite">
-          {shown.map((message) => (
-            message.id === regeneratingId ? null : (
-              <AIMessage
-                key={message.id}
-                role={message.role}
-                text={message.text}
-                userLabel={userInitial}
-                copyLabel={message.id === 'welcome' ? undefined : ui.copy}
-                copiedLabel={ui.copied}
-                regenerateLabel={ui.regenerate}
-                onRegenerate={message.id === lastAssistantId && message.id !== 'welcome' ? () => { void regenerate(message.id) } : undefined}
-                busy={isLoading}
-              />
-            )
-          ))}
-          {isLoading && <AIMessage role="assistant" text={ui.thinking} loading />}
-        </div>
+          </div>
+        )}
 
         {(error || historyFailed) && <div className="error-message ai-chat-error" role="alert">{error ?? ui.historyError}</div>}
 
@@ -381,16 +397,16 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleInputKeyDown}
-              placeholder={t.ai.placeholder}
+              placeholder={ui.placeholder}
               rows={2}
-              maxLength={4000}
+              maxLength={300}
               disabled={isLoading}
             />
             <button type="submit" className="ai-chat-send-btn" disabled={isLoading || !input.trim()} aria-label={ui.send} title={ui.send}>
               <SendHorizonal size={18} />
             </button>
           </div>
-          <small className="ai-chat-input-hint">{t.ai.inputHint}</small>
+          <small className="ai-chat-input-hint">{ui.onlyListHint}</small>
         </form>
       </div>
     </section>

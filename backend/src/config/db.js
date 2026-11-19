@@ -208,6 +208,10 @@ if (!userProfileColumns.has('account_status')) {
 if (!userProfileColumns.has('is_blocked')) {
   db.exec('ALTER TABLE user_profiles ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0')
 }
+if (!userProfileColumns.has('must_change_password')) {
+  // 1 = the password was set from ADMIN_INITIAL_PASSWORD and must be changed at first sign-in.
+  db.exec('ALTER TABLE user_profiles ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0')
+}
 if (!userProfileColumns.has('role')) {
   db.exec("ALTER TABLE user_profiles ADD COLUMN role TEXT NOT NULL DEFAULT 'User'")
 }

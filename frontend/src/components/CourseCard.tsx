@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { type Course } from '../data'
 import { translations, appendFromParam, pick, levelLabel, type Lang } from '../appShared'
 import { CourseDirectionIcon } from './CourseCategories'
+import { CourseLogo, formatWeeks } from './MobileHome'
 
 export default function CourseCard({ course, language, favorites, onToggleFavorite, backTo = '/courses', completedLessons }: { course: Course; language?: Lang; favorites?: string[]; onToggleFavorite?: React.Dispatch<React.SetStateAction<string[]>>; backTo?: string; completedLessons?: string[] }) {
   const activeLanguage = language && translations[language] ? language : 'ru'
@@ -25,6 +26,18 @@ export default function CourseCard({ course, language, favorites, onToggleFavori
         )}
         <span className="course-card-icon"><CourseDirectionIcon courseId={course.id} size={34} /></span>
       </div>
+      {/* Phones: compact head as in the mobile mockup (logo tile, rating, favourite) */}
+      <div className="course-card-mobile-head">
+        <Link to={coursePath} className="course-card-mobile-logo" aria-label={course.title[activeLanguage]}><CourseLogo course={course} /></Link>
+        <span className="course-card-mobile-side">
+          <span className="course-rating-pill"><Star size={14} fill="currentColor" /> {course.rating.toFixed(1)}</span>
+          {onToggleFavorite && (
+          <button type="button" className={isFavorite ? 'favorite-button mobile-fav active' : 'favorite-button mobile-fav'} aria-pressed={!!isFavorite} onClick={() => { onToggleFavorite((current) => current.includes(course.id) ? current.filter((item) => item !== course.id) : [...current, course.id]) }} aria-label={pick(activeLanguage, 'Тандалмаларга', 'В избранное', 'Favorite course')}>
+            <Star size={18} fill={isFavorite ? 'currentColor' : 'none'} />
+          </button>
+        )}
+        </span>
+      </div>
       <div className="course-card-body">
         <div className="course-card-tags">
           <Badge tone="green">{levelLabel(course.level, activeLanguage)}</Badge>
@@ -34,8 +47,8 @@ export default function CourseCard({ course, language, favorites, onToggleFavori
         <p>{course.description[activeLanguage]}</p>
         <div className="course-card-meta">
           <span><PlayCircle size={15} /> {lessonTotal} {tt.home.lessons}</span>
-          <span><Clock3 size={15} /> {course.duration}</span>
-          <span><Users size={15} /> {course.students}</span>
+          <span><Clock3 size={15} /> {formatWeeks(course.duration, activeLanguage)}</span>
+          <span className="course-card-students"><Users size={15} /> {course.students}</span>
         </div>
         {completedLessons && doneCount > 0 && <ProgressBar value={percent} label={`${doneCount}/${lessonTotal}`} showValue />}
         <div className="course-footer">

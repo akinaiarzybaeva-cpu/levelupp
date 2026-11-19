@@ -164,7 +164,8 @@ const server = spawn(process.execPath, [serverEntry], {
     TELEGRAM_BOT_TOKEN: '',
     PAYMENT_API_BASE_URL: '',
     TRUST_PROXY_HOPS: '0',
-    PASSWORD_RESET_RATE_LIMIT_MAX: '40'
+    PASSWORD_RESET_RATE_LIMIT_MAX: '40',
+    LOGIN_RATE_LIMIT_MAX: '40'
   },
   stdio: ['ignore', 'pipe', 'pipe']
 })
@@ -289,6 +290,41 @@ try {
     adminToken = data.token
     return (status === 200 && data.user.role === 'Admin') || `${status} ${JSON.stringify(data)}`
   })
+  await check('First sign-in: the admin created from ADMIN_INITIAL_PASSWORD must change it (flag in login + /api/admin/account)', async () => {
+    const login = await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: adminPassword } })
+    adminToken = login.data.token
+    const account = await request('/api/admin/account', { token: adminToken })
+    return (login.data.user.mustChangePassword === true && account.status === 200 && account.data.mustChangePassword === true && account.data.email === ADMIN_EMAIL) || JSON.stringify({ login: login.data.user, account: account.data })
+  })
+  await check('First sign-in: every other admin API answers 403 PASSWORD_CHANGE_REQUIRED until the password is changed', async () => {
+    const stats = await request('/api/admin/stats', { token: adminToken })
+    const users = await request('/api/admin/users', { token: adminToken })
+    return (stats.status === 403 && stats.data.code === 'PASSWORD_CHANGE_REQUIRED' && users.status === 403) || JSON.stringify({ stats, users: users.status })
+  })
+  await check('First sign-in: wrong current password is rejected', async () => {
+    const r = await request('/api/admin/settings/password', { method: 'PUT', token: adminToken, body: { currentPassword: 'not-the-password-1', newPassword: 'FirstChange#2026', confirmPassword: 'FirstChange#2026' } })
+    return (r.status === 400 && /incorrect/i.test(r.data.error)) || `${r.status} ${r.data.error}`
+  })
+  await check('First sign-in: changing the initial password unlocks the panel and revokes the old session', async () => {
+    const next = `Adm-${crypto.randomBytes(9).toString('base64url')}7`
+    const change = await request('/api/admin/settings/password', { method: 'PUT', token: adminToken, body: { currentPassword: adminPassword, newPassword: next, confirmPassword: next } })
+    const oldSession = await request('/api/admin/account', { token: adminToken })
+    const oldLogin = await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: adminPassword } })
+    adminPassword = next
+    const fresh = await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: adminPassword } })
+    adminToken = fresh.data.token
+    const account = await request('/api/admin/account', { token: adminToken })
+    const stats = await request('/api/admin/stats', { token: adminToken })
+    const db = await sqlite()
+    const row = db.prepare('SELECT password_hash, must_change_password FROM user_profiles WHERE user_email = ?').get(ADMIN_EMAIL)
+    db.close()
+    return (change.status === 200 && oldSession.status === 401 && oldLogin.status === 401 && fresh.status === 200 && fresh.data.user.mustChangePassword === false && account.data.mustChangePassword === false && stats.status === 200 && row.must_change_password === 0 && /^\$2[aby]\$/.test(row.password_hash)) || JSON.stringify({ change: change.status, old: oldSession.status, oldLogin: oldLogin.status, fresh: fresh.status, account: account.data, stats: stats.status, flag: row.must_change_password })
+  })
+  await check('SECURITY: nobody can self-register the administrator account', async () => {
+    const r = await request('/api/auth/register', { method: 'POST', body: { name: 'Fake Admin', email: ADMIN_EMAIL, password: 'Hijack#Pass123' } })
+    const login = await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: 'Hijack#Pass123' } })
+    return (r.status === 409 && login.status === 401) || `${r.status}/${login.status}`
+  })
   await check('SECURITY: regular user gets 403 on admin API', async () =>
     (await request('/api/admin/stats', { token: tokenA })).status === 403)
   await check('SECURITY: anonymous gets 401 on admin API', async () =>
@@ -399,11 +435,11 @@ try {
     await request(`/api/admin/subscriptions/${userA.email}`, { method: 'PATCH', token: adminToken, body: { action: 'revoke' } })
     return (await request(`/api/subscription/${userA.email}`, { token: tokenA })).data.status === 'expired'
   })
-  // No ANTHROPIC_API_KEY in this suite: access checks pass, then the server reports the missing AI configuration.
-  await check('Admin grants AI Pro -> AI chat passes access checks (503 AI_NOT_CONFIGURED without a key)', async () => {
+  // The assistant answers from the LevelUp knowledge base: it works without ANTHROPIC_API_KEY.
+  await check('Admin grants AI Pro -> the assistant answers a prepared question (knowledge base, no API key needed)', async () => {
     await request('/api/admin/ai-pro/user', { method: 'POST', token: adminToken, body: { userEmail: userA.email, action: 'activate', days: 30 } })
-    const { status, data } = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { question: 'What is HTML?', language: 'en' } })
-    return (status === 503 && data.code === 'AI_NOT_CONFIGURED') || JSON.stringify({ status, data })
+    const { status, data } = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { questionId: 'html-what', language: 'en' } })
+    return (status === 200 && data.source === 'knowledge-base' && /HTML/.test(data.answer)) || JSON.stringify({ status, data })
   })
   await check('"+30 days" extends an active AI Pro grant from its end date', async () => {
     const first = (await request(`/api/subscription/${userA.email}`, { token: tokenA })).data.endsAt
@@ -412,12 +448,12 @@ try {
     const diffDays = (new Date(second) - new Date(first)) / 86400000
     return Math.round(diffDays) === 30 || `diff=${diffDays}`
   })
-  await check('AI Pro system switch off -> 503 AI_DISABLED, on -> back to the AI configuration check', async () => {
+  await check('AI Pro system switch off -> 503 AI_DISABLED, on -> the assistant answers again', async () => {
     await request('/api/admin/ai-pro/system', { method: 'PATCH', token: adminToken, body: { enabled: false } })
-    const off = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { question: 'x' } })
+    const off = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { questionId: 'css-what' } })
     await request('/api/admin/ai-pro/system', { method: 'PATCH', token: adminToken, body: { enabled: true } })
-    const on = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { question: 'x' } })
-    return (off.status === 503 && off.data.code === 'AI_DISABLED' && on.data.code === 'AI_NOT_CONFIGURED') || JSON.stringify({ off: off.data, on: on.data })
+    const on = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { questionId: 'css-what' } })
+    return (off.status === 503 && off.data.code === 'AI_DISABLED' && on.status === 200 && on.data.questionId === 'css-what') || JSON.stringify({ off: off.data, on: on.data })
   })
 
   // ── Payments (provider intentionally NOT configured in tests) ───────────────
@@ -565,6 +601,105 @@ try {
     const stats = await request('/api/admin/stats', { token: adminToken })
     return (link.pathname === '/admin/reset-password' && reset.status === 200 && oldSession.status === 401 && oldLogin.status === 401 && fresh.status === 200 && stats.status === 200) || `${reset.status}/${oldSession.status}/${oldLogin.status}/${fresh.status}/${stats.status}`
   })
+  // ── Admin "Forgot password?" with a 6-digit e-mail code ────────────────────
+  const codeMails = () => mailsTo(ADMIN_EMAIL).filter((m) => /код восстановления|reset code|калыбына келтирүү коду/i.test(m.subject))
+  const lastCode = () => { const m = codeMails().at(-1); return m ? ((m.body.match(/^\s*(\d{6})\s*$/m) || [])[1] ?? null) : null }
+  const allowResend = async () => { const db = await sqlite(false); db.prepare('UPDATE admin_reset_codes SET created_at = ? WHERE user_email = ?').run(new Date(Date.now() - 61_000).toISOString(), ADMIN_EMAIL); db.close() }
+  const sendCode = async (language = 'ru') => { const before = codeMails().length; const r = await request('/api/auth/admin-reset/request', { method: 'POST', body: { email: ADMIN_EMAIL, language } }); await waitFor(() => codeMails().length > before); return r }
+
+  await check('Code: request sends a 6-digit code by e-mail (RU subject, 5 minutes, warning, logo); only a bcrypt hash is stored', async () => {
+    const r = await sendCode('ru')
+    const mail = codeMails().at(-1)
+    const code = lastCode()
+    const db = await sqlite()
+    const row = db.prepare('SELECT * FROM admin_reset_codes WHERE user_email = ? ORDER BY created_at DESC LIMIT 1').get(ADMIN_EMAIL)
+    db.close()
+    const ttl = (Date.parse(row.expires_at) - Date.parse(row.created_at)) / 60000
+    return (r.status === 200 && r.data.cooldownSeconds === 60 && r.data.expiresInSeconds === 300 && /^\d{6}$/.test(code ?? '') && /Код восстановления пароля LevelUp/.test(mail.subject) && /5 минут/.test(mail.body) && /не запрашивали/.test(mail.body) && /levelup-logo\.png/.test(mail.body) && /^\$2[aby]\$/.test(row.code_hash) && !JSON.stringify(row).includes(code) && Math.round(ttl) === 5) || JSON.stringify({ status: r.status, data: r.data, code, subject: mail?.subject, ttl })
+  })
+  await check('Code: resend within 60 s is refused (429 RESEND_COOLDOWN), also for an unknown e-mail (no enumeration)', async () => {
+    const again = await request('/api/auth/admin-reset/request', { method: 'POST', body: { email: ADMIN_EMAIL } })
+    const unknown1 = await request('/api/auth/admin-reset/request', { method: 'POST', body: { email: 'nobody-here@example.test' } })
+    const unknown2 = await request('/api/auth/admin-reset/request', { method: 'POST', body: { email: 'nobody-here@example.test' } })
+    return (again.status === 429 && again.data.code === 'RESEND_COOLDOWN' && again.data.retryAfter > 0 && again.data.retryAfter <= 60 && unknown1.status === 200 && unknown1.data.message === (await Promise.resolve(unknown1.data.message)) && unknown2.status === 429) || JSON.stringify({ again, unknown1, unknown2: unknown2.status })
+  })
+  await check('Code: unknown e-mail gets the same neutral answer and no e-mail is sent', async () => {
+    const before = mails.length
+    const r = await request('/api/auth/admin-reset/request', { method: 'POST', body: { email: 'other-person@example.test' } })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    return (r.status === 200 && /6-digit code/.test(r.data.message) && mails.length === before) || JSON.stringify(r)
+  })
+  await check('Code: a regular user e-mail cannot get an admin code', async () => {
+    const before = mailsTo(userA.email).length
+    const r = await request('/api/auth/admin-reset/request', { method: 'POST', body: { email: userA.email } })
+    const v = await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: userA.email, code: '123456' } })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    return (r.status === 200 && mailsTo(userA.email).length === before && v.status === 400) || JSON.stringify({ r: r.status, v: v.status })
+  })
+  await check('Code: wrong code is rejected with the number of attempts left', async () => {
+    const good = lastCode()
+    const wrong = good === '000000' ? '111111' : '000000'
+    const r = await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: ADMIN_EMAIL, code: wrong } })
+    const bad = await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: ADMIN_EMAIL, code: '12ab' } })
+    return (r.status === 400 && r.data.code === 'CODE_WRONG' && r.data.attemptsLeft === 4 && bad.status === 400 && bad.data.code === 'CODE_FORMAT') || JSON.stringify({ r, bad })
+  })
+  await check('Code: after 5 wrong attempts the code is burned (even the right code no longer works)', async () => {
+    const good = lastCode()
+    const wrong = good === '000000' ? '111111' : '000000'
+    const results = []
+    for (let i = 0; i < 4; i++) results.push((await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: ADMIN_EMAIL, code: wrong } })).data.code)
+    const right = await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: ADMIN_EMAIL, code: good } })
+    return (results.join(',') === 'CODE_WRONG,CODE_WRONG,CODE_WRONG,TOO_MANY_ATTEMPTS' && right.status === 400 && right.data.code === 'CODE_INVALID') || JSON.stringify({ results, right: right.data })
+  })
+  await check('Code: an expired code (older than 5 minutes) is rejected', async () => {
+    await allowResend()
+    await sendCode('en')
+    const code = lastCode()
+    const db = await sqlite(false)
+    db.prepare('UPDATE admin_reset_codes SET expires_at = ? WHERE user_email = ? AND used = 0').run(new Date(Date.now() - 1000).toISOString(), ADMIN_EMAIL)
+    db.close()
+    const r = await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: ADMIN_EMAIL, code } })
+    return (r.status === 400 && r.data.code === 'CODE_EXPIRED' && /Your LevelUp password reset code/.test(codeMails().at(-1).subject)) || JSON.stringify(r)
+  })
+  await check('Code: a new code replaces the previous one', async () => {
+    await allowResend()
+    await sendCode('kg')
+    const first = lastCode()
+    await allowResend()
+    await sendCode('kg')
+    const second = lastCode()
+    const old = first === second ? { status: 0 } : await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: ADMIN_EMAIL, code: first } })
+    return (first !== second && old.status === 400 && /калыбына келтирүү коду/i.test(codeMails().at(-1).subject)) || JSON.stringify({ first, second, old })
+  })
+  let resetToken = ''
+  await check('Code: the correct code gives a one-time reset token; the code cannot be used twice', async () => {
+    const code = lastCode()
+    const r = await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: ADMIN_EMAIL, code } })
+    resetToken = r.data.resetToken
+    const twice = await request('/api/auth/admin-reset/verify', { method: 'POST', body: { email: ADMIN_EMAIL, code } })
+    return (r.status === 200 && /^[a-f0-9]{64}$/.test(resetToken) && r.data.expiresInSeconds === 600 && twice.status === 400) || JSON.stringify({ r: r.data, twice: twice.data })
+  })
+  await check('Code: new password must be entered twice, contain letters + digits; a fake token is refused', async () => {
+    const mismatch = await request('/api/auth/admin-reset/complete', { method: 'POST', body: { email: ADMIN_EMAIL, resetToken, newPassword: 'NewAdmin#2026', confirmPassword: 'NewAdmin#2027' } })
+    const weak = await request('/api/auth/admin-reset/complete', { method: 'POST', body: { email: ADMIN_EMAIL, resetToken, newPassword: 'onlyletters', confirmPassword: 'onlyletters' } })
+    const fake = await request('/api/auth/admin-reset/complete', { method: 'POST', body: { email: ADMIN_EMAIL, resetToken: 'a'.repeat(64), newPassword: 'NewAdmin#2026', confirmPassword: 'NewAdmin#2026' } })
+    return (mismatch.status === 400 && /do not match/.test(mismatch.data.error) && weak.status === 400 && /letters and digits/.test(weak.data.error) && fake.status === 400 && fake.data.code === 'RESET_INVALID') || JSON.stringify({ mismatch: mismatch.data, weak: weak.data, fake: fake.data })
+  })
+  await check('Code: password is changed, all sessions revoked, old password fails, new password works, token is single-use', async () => {
+    const sessionBefore = adminToken
+    const next = `Code-${crypto.randomBytes(6).toString('base64url')}9`
+    const before = mailsTo(ADMIN_EMAIL).length
+    const done = await request('/api/auth/admin-reset/complete', { method: 'POST', body: { email: ADMIN_EMAIL, resetToken, newPassword: next, confirmPassword: next, language: 'ru' } })
+    const reuse = await request('/api/auth/admin-reset/complete', { method: 'POST', body: { email: ADMIN_EMAIL, resetToken, newPassword: next + 'x', confirmPassword: next + 'x' } })
+    const oldSession = await request('/api/admin/stats', { token: sessionBefore })
+    const oldLogin = await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: adminPassword } })
+    adminPassword = next
+    const fresh = await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: adminPassword } })
+    adminToken = fresh.data.token
+    const stats = await request('/api/admin/stats', { token: adminToken })
+    const notified = await waitFor(() => mailsTo(ADMIN_EMAIL).length > before && /пароль изменён|changed/i.test(mailsTo(ADMIN_EMAIL).at(-1).subject))
+    return (done.status === 200 && done.data.sessionsRevoked === true && reuse.status === 400 && oldSession.status === 401 && oldLogin.status === 401 && fresh.status === 200 && stats.status === 200 && notified) || JSON.stringify({ done: done.data, reuse: reuse.status, oldSession: oldSession.status, oldLogin: oldLogin.status, fresh: fresh.status, stats: stats.status, notified })
+  })
   await check('Logout revokes the session token', async () => {
     await request('/api/auth/logout', { method: 'POST', token: adminToken })
     return (await request('/api/admin/stats', { token: adminToken })).status === 401
@@ -598,7 +733,7 @@ try {
   })
   await check('Repeated wrong admin passwords are rate-limited (429)', async () => {
     const statuses = []
-    for (let i = 0; i < 20; i++) statuses.push((await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: `wrong-${i}` } })).status)
+    for (let i = 0; i < 45; i++) statuses.push((await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: `wrong-${i}` } })).status)
     return statuses.includes(429) || `no 429 in ${[...new Set(statuses)].join(',')}`
   })
 } finally {

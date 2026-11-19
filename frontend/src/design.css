@@ -2476,3 +2476,145 @@ html { scroll-padding-top: 96px; }
   .ai-key-cats button { flex: 0 0 auto; }
   .ai-chat-message-actions .ai-msg-action span { display: inline; }
 }
+
+/* language switch inside the AI assistant (the page has no site header) */
+.ai-chat-lang { margin-right: auto; display: flex; align-items: center; }
+.ai-chat-lang .header-lang-trigger { min-height: 34px; }
+.ai-chat-hero-top { position: relative; z-index: 3; }
+/* grid children must be allowed to shrink, otherwise the scrollable category row widens the column on phones */
+.ai-chat-shell > .ai-chat-main,
+.ai-chat-shell > .ai-chat-sidebar,
+.ai-key-questions,
+.ai-chat-history { min-width: 0; }
+@media (max-width: 980px) {
+  .ai-chat-history-list { min-height: 0; }
+}
+
+/* AI assistant: only the 15 prepared questions */
+div.ai-key-head { cursor: default; }
+.ai-key-icon.cat-html-css { background: #e3572c; }
+.ai-key-icon.cat-tools { background: #2f6fde; }
+.ai-key-icon.cat-basics { background: #2f7d55; }
+.ai-not-allowed {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1.5px solid rgba(245, 184, 46, 0.55);
+  background: rgba(245, 184, 46, 0.12);
+  color: var(--heading);
+  animation: lu-rise 0.25s var(--lu-ease, ease);
+}
+.ai-not-allowed svg { flex: 0 0 auto; color: var(--lu-gold, #f5b82e); margin-top: 2px; }
+.ai-not-allowed p { margin: 0; font-weight: 600; line-height: 1.5; }
+.ai-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1.5px solid var(--lu-emerald);
+  background: var(--primary-soft);
+  color: var(--heading);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.2s var(--lu-ease, ease);
+}
+.ai-back-btn:hover { background: var(--lu-emerald); color: #fff; transform: translateX(-2px); }
+.ai-open-answers { align-self: flex-start; }
+.ai-answer-block { scroll-behavior: smooth; }
+.ai-chat-history-open { background: none; border: 0; padding: 0; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+
+/* AI assistant: input area and answer block use theme tokens (readable in light AND dark).
+   The older rules in index.css had light-on-dark colours only. */
+.ai-chat-form .ai-chat-input-label { color: var(--heading); }
+.ai-chat-form .ai-chat-input-shell {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 14px;
+  color: var(--lu-ink-soft);
+}
+.ai-chat-form .ai-chat-input-shell > svg { flex: 0 0 auto; color: var(--lu-emerald); }
+.ai-chat-form .ai-chat-input-shell textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--heading);
+  font-size: 1rem;
+  line-height: 1.5;
+  padding: 10px 2px;
+}
+.ai-chat-form .ai-chat-input-shell textarea::placeholder { color: var(--lu-ink-soft); opacity: 0.9; }
+.ai-chat-form .ai-chat-input-shell textarea:disabled { color: var(--lu-ink-soft); }
+.ai-chat-form .ai-chat-send-btn { width: 46px; height: 46px; flex: 0 0 auto; }
+.ai-chat-form .ai-chat-input-hint { color: var(--lu-ink-soft); }
+.ai-chat-main .ai-chat-history,
+:root[data-theme='dark'] .ai-chat-main .ai-chat-history { background: var(--lu-surface-2); border-color: var(--lu-line); }
+@media (max-width: 560px) {
+  .ai-chat-form .ai-chat-input-shell { padding: 6px 6px 6px 12px; }
+  .ai-chat-form .ai-chat-send-btn { width: 42px; height: 42px; }
+  .ai-chat-form .ai-chat-input-hint { text-align: left; }
+}
+
+/* AI assistant: chat bubbles keep their own text colours in both themes
+   (a general light-theme paragraph colour used to make them pale). */
+.ai-chat-main .ai-chat-message.assistant,
+:root[data-theme='dark'] .ai-chat-main .ai-chat-message.assistant { background: var(--lu-surface); color: var(--heading); }
+.ai-chat-main .ai-chat-message.assistant :is(p, li, h3, h4, strong, em, blockquote) { color: inherit; }
+.ai-chat-main .ai-chat-message.assistant .ai-chat-message-head { color: var(--lu-ink-soft); }
+.ai-chat-main .ai-chat-message.assistant .ai-chat-message-head svg { color: var(--lu-emerald); }
+.ai-chat-main .ai-chat-message.user,
+:root:not([data-theme='dark']) .ai-chat-main .ai-chat-message.user { background: #0b7f4a; color: #ffffff; }
+:root[data-theme='dark'] .ai-chat-main .ai-chat-message.user { background: var(--lu-forest-900); color: #eafaf0; }
+.ai-chat-main .ai-chat-message.user :is(p, .ai-chat-message-head),
+:root:not([data-theme='dark']) .ai-chat-main .ai-chat-message.user :is(p, .ai-chat-message-head) { color: inherit; }
+.ai-chat-main .ai-chat-message.user .ai-chat-message-head { opacity: 0.85; }
+.ai-chat-main .ai-chat-message.loading { color: var(--lu-ink-soft); }
+
+/* AI assistant: error line readable in both themes (was pale pink on white) */
+.ai-chat-main .ai-chat-error {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.08);
+  color: #b42318;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+:root[data-theme='dark'] .ai-chat-main .ai-chat-error { color: #ffb4ab; background: rgba(248, 113, 113, 0.12); border-color: rgba(248, 113, 113, 0.35); }
+
+/* AI assistant: code examples with syntax highlighting and a "Copy code" button */
+.ai-md-codeblock { margin: 0 0 12px; border-radius: 12px; overflow: hidden; background: #0d1b22; border: 1px solid rgba(255, 255, 255, 0.06); }
+.ai-md-code-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 6px 14px; background: #13262f; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+.ai-md-codeblock .ai-md-code-lang { position: static; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #9fb8b0; }
+.ai-md-code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: #dfeee9;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ai-md-code-copy:hover { border-color: #3ee08f; color: #3ee08f; }
+.ai-md-codeblock .ai-md-code { margin: 0; border-radius: 0; background: transparent; color: #e3f1ec; }
+.ai-md .ai-md-codeblock code { background: none; padding: 0; color: inherit; }
+.tok-comment { color: #7f9a8f; font-style: italic; }
+.tok-string { color: #a5e3a0; }
+.tok-keyword { color: #ff9ac1; }
+.tok-number { color: #f8c27a; }
+.tok-tag { color: #7cc7ff; }
+.tok-attr { color: #ffd27a; }
+.tok-func { color: #9ad1ff; }
+.tok-prop { color: #8be9fd; }
+.tok-selector { color: #c4a7ff; }
+.tok-cmd { color: #7cf0b5; font-weight: 600; }
+.tok-flag { color: #ffd27a; }

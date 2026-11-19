@@ -10,6 +10,7 @@ import AdminDashboard from './AdminDashboard'
 import UserTable from './UserTable'
 import TelegramNotification from './TelegramNotification'
 import { AdminLanguageSwitch, useAdminT } from './adminI18n'
+import AdminFirstLogin from './AdminFirstLogin'
 import { useLanguage } from '../appShared'
 
 // ─── Users section ────────────────────────────────────────────────────────────
@@ -314,7 +315,7 @@ function CoursesSection({ onToast }: { onToast: (msg: string, kind: ToastKind) =
               <tbody>
                 {filtered.map((c) => (
                   <tr key={c.id}>
-                    <td><span className="plan-tag" style={{ background: c.color, color: c.accent }}>{c.badge}</span></td>
+                    <td><span className="plan-tag admin-course-tag" style={{ background: c.color, color: c.accent, ["--tag-accent" as string]: c.accent }}>{c.badge}</span></td>
                     <td>
                       <div>
                         <strong>{c.title_ru}</strong>
@@ -811,8 +812,8 @@ function AiProSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => 
       {aiProvider && (
         <p className="admin-hint">
           {t("AI provider (Claude API):")} {aiProvider.configured
-            ? <span className="admin-pill success">{t("configured ·")} {aiProvider.model}</span>
-            : <span className="admin-pill danger">{t("not configured — set ANTHROPIC_API_KEY on the backend")}</span>}
+            ? <span className="admin-pill admin-pill-sentence success">{t("Configured ·")} {aiProvider.model}</span>
+            : <span className="admin-pill admin-pill-sentence danger">{t("Not configured — set ANTHROPIC_API_KEY on the backend")}</span>}
         </p>
       )}
 
@@ -2165,7 +2166,29 @@ function PurchasesSection({ onToast }: { onToast: (msg: string, kind: ToastKind)
   )
 }
 
+/**
+ * Checks the account first: while the initial password is still in use only the
+ * "change password" screen is shown (the backend enforces the same rule).
+ */
 export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
+  const t = useAdminT()
+  const [account, setAccount] = useState<{ email: string; mustChangePassword: boolean } | null>(null)
+  const [accountError, setAccountError] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    adminFetch<{ email: string; mustChangePassword: boolean }>('/api/admin/account')
+      .then((data) => { if (!cancelled) setAccount(data) })
+      .catch(() => { if (!cancelled) setAccountError(true) })
+    return () => { cancelled = true }
+  }, [])
+
+  if (!account && !accountError) return <div className="admin-login-shell"><div className="admin-loading-state">{t("Loading…")}</div></div>
+  if (account?.mustChangePassword) return <AdminFirstLogin adminEmail={account.email} onLogout={onLogout} />
+  return <AdminPanelContent user={user} onLogout={onLogout} />
+}
+
+function AdminPanelContent({ user, onLogout }: AdminPanelProps) {
   const t = useAdminT()
   const [activeSection, setActiveSection] = useState<AdminSection>('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)

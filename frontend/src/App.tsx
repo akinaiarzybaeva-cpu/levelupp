@@ -15,7 +15,7 @@ import './components/AdminPanel.css'
 // The admin panel is large and only used by the administrator, so it is loaded on demand.
 const AdminPanel = lazy(() => import('./components/AdminPanel'))
 
-import { defaultNotificationSettings, defaultReviews, faqData, translations, getStoredValue, setStoredValue, getStoredLastAuthEmail, setStoredLastAuthEmail, resolveSafeNextPath, appendFromParam, fetchJson, formatCompactNumber, AnimatedMetric, SmartBackButton, isAdminRole, sanitizeReviews, buildReviewLessonOptions, createEmptyProgress, renderAvatarContent, buildLeaderboard, getCurrentUserProgress, LanguageContext, LanguageSetterContext, useLanguage, pick, levelLabel, normalizeLanguage, normalizeTheme, buildCourseCatalog, CourseCatalogContext, useCourseCatalog, bundledPlans, PLAN_RANK, GUEST_LESSON_LIMIT, BillingContext, useBilling, accessPlanOf, useLessonLimit, formatDateTime, subscriptionStatusText, paymentStatusText, historyEventText, UpgradeRequiredModal, mapApiCourse, hasActiveAiAccess, type Lang, type Theme, type UserProfile, type NotificationSettings, type UserProgress, type SiteStats, type LeaderboardEntry, type Review, type CourseCatalog, type ApiCourse, type PlanView, type BillingState } from './appShared'
+import { defaultNotificationSettings, defaultReviews, faqData, translations, getStoredValue, setStoredValue, getStoredLastAuthEmail, setStoredLastAuthEmail, resolveSafeNextPath, appendFromParam, fetchJson, formatCompactNumber, AnimatedMetric, SmartBackButton, isAdminRole, sanitizeReviews, buildReviewLessonOptions, createEmptyProgress, renderAvatarContent, buildLeaderboard, getCurrentUserProgress, LanguageContext, LanguageSetterContext, useLanguage, pick, levelLabel, normalizeLanguage, buildCourseCatalog, CourseCatalogContext, useCourseCatalog, bundledPlans, PLAN_RANK, GUEST_LESSON_LIMIT, BillingContext, useBilling, accessPlanOf, useLessonLimit, formatDateTime, subscriptionStatusText, paymentStatusText, historyEventText, UpgradeRequiredModal, mapApiCourse, hasActiveAiAccess, type Lang, type Theme, type UserProfile, type NotificationSettings, type UserProgress, type SiteStats, type LeaderboardEntry, type Review, type CourseCatalog, type ApiCourse, type PlanView, type BillingState } from './appShared'
 import HeroSection, { HeroIllustration } from './components/HeroSection'
 import Sidebar from './components/Sidebar'
 import Logo from './components/Logo'
@@ -32,6 +32,7 @@ import Notification from './components/Notification'
 import UserProfileCard from './components/UserProfile'
 import ProfileSettings from './components/ProfileSettings'
 import Header from './components/Header'
+import { formatWeeks, MobileCatalogHeading, MobileHeroCard, MobileMyLessons, MobilePopularCourses, MobileQuickNav, MobileStatsCard } from './components/MobileHome'
 import AIChat from './components/AIChat'
 import PricingCard, { PlanComparison } from './components/PricingCard'
 import FAQAccordion from './components/FAQAccordion'
@@ -50,7 +51,10 @@ function App() {
 function AppShell() {
   const navigate = useNavigate()
   const [language, setLanguage] = useState<Lang>(() => normalizeLanguage(getStoredValue('levelup-language', 'ru')))
-  const [theme, setTheme] = useState<Theme>(() => normalizeTheme(getStoredValue('levelup-theme', 'light')))
+  // The site always opens (and re-opens after a refresh) in Light Mode. Dark Mode can be switched on
+  // manually and lasts until the page is reloaded: it is intentionally not restored from storage
+  // or from the system colour-scheme preference.
+  const [theme, setTheme] = useState<Theme>('light')
   const [catalog, setCatalog] = useState<CourseCatalog>(() => buildCourseCatalog(bundledCourses))
   const courses = catalog.courses
   const [authToken, setAuthToken] = useState<string>(() => getStoredAuthToken())
@@ -123,8 +127,13 @@ function AppShell() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    setStoredValue('levelup-theme', theme)
+    document.documentElement.style.colorScheme = theme
   }, [theme])
+
+  // Older versions saved the theme; that value is no longer used, so it is removed.
+  useEffect(() => {
+    try { window.localStorage.removeItem('levelup-theme') } catch { /* storage unavailable */ }
+  }, [])
 
   useEffect(() => {
     setStoredValue('levelup-language', language)
@@ -566,13 +575,13 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<Navigate to="/home" replace />} />
           <Route path="/start-learning" element={<StartLearningRedirect />} />
-          <Route path="/home" element={<HomePage t={t} reviews={reviews} leaderboard={leaderboard} siteStats={siteStats} />} />
+          <Route path="/home" element={<HomePage t={t} reviews={reviews} leaderboard={leaderboard} siteStats={siteStats} completedLessons={currentUserLessons} isLoggedIn={isLoggedIn} />} />
           <Route path="/courses/:courseId/lessons/:lessonId" element={<LessonPage t={t} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} isLoggedIn={isLoggedIn} onCompleteLesson={completeLessonForCurrentUser} />} />
           <Route path="/courses/:courseId" element={<CourseDetailPage t={t} completedLessons={user ? currentUserLessons : completedLessons} onCourseComplete={awardCourseCompletion} subscription={currentUserSubscription} isLoggedIn={isLoggedIn} />} />
-          <Route path="/courses" element={<CourseCatalogPage t={t} favorites={favorites} onToggleFavorite={setFavorites} completedLessons={user ? currentUserLessons : completedLessons} />} />
+          <Route path="/courses" element={<CourseCatalogPage t={t} siteStats={siteStats} favorites={favorites} onToggleFavorite={setFavorites} completedLessons={user ? currentUserLessons : completedLessons} />} />
           <Route path="/auth" element={<AuthPage t={t} user={user} isLoggedIn={isLoggedIn} setIsLoggedIn={setIsLoggedIn} setUser={setUser} setAuthToken={setAuthToken} onUserRegistered={refreshSiteStats} />} />
           <Route path="/dashboard" element={<ProtectedRoute isLoggedIn={isLoggedIn} pending={sessionPending}><DashboardPage t={t} user={user} completedLessons={user ? currentUserLessons : completedLessons} subscription={currentUserSubscription} onUpdateProfile={updateUserProfile} onChangePassword={changeUserPassword} reviews={reviews} language={language} setLanguage={setLanguage} theme={theme} setTheme={setTheme} onLogout={() => { void handleLogout() }} /></ProtectedRoute>} />
-          <Route path="/dashboard/courses" element={<ProtectedRoute isLoggedIn={isLoggedIn} pending={sessionPending}><CourseCatalogPage t={t} favorites={favorites} onToggleFavorite={setFavorites} completedLessons={user ? currentUserLessons : completedLessons} /></ProtectedRoute>} />
+          <Route path="/dashboard/courses" element={<ProtectedRoute isLoggedIn={isLoggedIn} pending={sessionPending}><CourseCatalogPage t={t} siteStats={siteStats} favorites={favorites} onToggleFavorite={setFavorites} completedLessons={user ? currentUserLessons : completedLessons} /></ProtectedRoute>} />
           <Route path="/dashboard/my-lessons" element={<ProtectedRoute isLoggedIn={isLoggedIn} pending={sessionPending}><DashboardLessonsPage completedLessons={user ? currentUserLessons : completedLessons} language={language} /></ProtectedRoute>} />
           <Route path="/dashboard/rating" element={<ProtectedRoute isLoggedIn={isLoggedIn} pending={sessionPending}><RatingPage t={t} leaderboard={leaderboard} reviews={reviews} currentEmail={user?.email} /></ProtectedRoute>} />
           <Route path="/dashboard/reviews" element={<ProtectedRoute isLoggedIn={isLoggedIn} pending={sessionPending}><ReviewsPage t={t} reviews={reviews} setReviews={setReviews} isLoggedIn={isLoggedIn} user={user} onRefreshSiteStats={refreshSiteStats} /></ProtectedRoute>} />
@@ -712,7 +721,7 @@ function StartLearningRedirect() {
   )
 }
 
-function HomePage({ t, reviews, leaderboard, siteStats }: { t: (typeof translations)[Lang]; reviews: Review[]; leaderboard: LeaderboardEntry[]; siteStats: SiteStats }) {
+function HomePage({ t, reviews, leaderboard, siteStats, completedLessons = [], isLoggedIn = false }: { t: (typeof translations)[Lang]; reviews: Review[]; leaderboard: LeaderboardEntry[]; siteStats: SiteStats; completedLessons?: string[]; isLoggedIn?: boolean }) {
   const { courses } = useCourseCatalog()
   const language = useLanguage()
   const popularCourses = courses.slice(0, 3)
@@ -739,9 +748,19 @@ function HomePage({ t, reviews, leaderboard, siteStats }: { t: (typeof translati
 
   return (
     <>
-      <HeroSection t={t} startLearningLink={startLearningLink} />
+      {/* Phones: the first screen of the mobile mockup */}
+      <div className="home-mobile-only mobile-home container">
+        <MobileHeroCard variant="home" language={language} to="/courses" />
+        <MobileQuickNav language={language} isLoggedIn={isLoggedIn} labels={{ home: t.nav.home, courses: t.nav.courses, rating: t.nav.rating, reviews: t.nav.reviews, profile: t.nav.profile }} />
+        <MobileMyLessons courses={courses} completedLessons={completedLessons} isLoggedIn={isLoggedIn} language={language} />
+        <MobilePopularCourses courses={popularCourses} language={language} />
+        <MobileStatsCard siteStats={siteStats} language={language} />
+      </div>
 
-      <HomeStatsCard t={t} siteStats={siteStats} courseCount={courses.length} />
+      <div className="home-desktop-only">
+        <HeroSection t={t} startLearningLink={startLearningLink} />
+        <HomeStatsCard t={t} siteStats={siteStats} courseCount={courses.length} />
+      </div>
 
       <section className="section">
         <div className="container">
@@ -760,14 +779,14 @@ function HomePage({ t, reviews, leaderboard, siteStats }: { t: (typeof translati
         </div>
       </section>
 
-      <section className="section categories-section">
+      <section className="section categories-section home-desktop-only">
         <div className="container">
           <HomeSectionHeader eyebrow={t.home.categories} title={t.home.directions} linkTo="/courses" linkLabel={t.home.allCourses} />
           <CourseCategories />
         </div>
       </section>
 
-      <section id="popular-courses" className="section alt-bg">
+      <section id="popular-courses" className="section alt-bg home-desktop-only">
         <div className="container">
           <div className="home-desktop-only"><HomeSectionHeader eyebrow={t.home.popular} title={t.home.chooseCourse} linkTo="/courses" linkLabel={t.home.viewAll} /></div>
           <div className="home-mobile-only">
@@ -859,7 +878,7 @@ function HomePage({ t, reviews, leaderboard, siteStats }: { t: (typeof translati
   )
 }
 
-function CourseCatalogPage({ t, favorites, onToggleFavorite, completedLessons = [] }: { t: (typeof translations)[Lang]; favorites: string[]; onToggleFavorite: React.Dispatch<React.SetStateAction<string[]>>; completedLessons?: string[] }) {
+function CourseCatalogPage({ t, siteStats, favorites, onToggleFavorite, completedLessons = [] }: { t: (typeof translations)[Lang]; siteStats?: SiteStats; favorites: string[]; onToggleFavorite: React.Dispatch<React.SetStateAction<string[]>>; completedLessons?: string[] }) {
   const { courses } = useCourseCatalog()
   const language = useLanguage()
   const location = useLocation()
@@ -924,6 +943,11 @@ function CourseCatalogPage({ t, favorites, onToggleFavorite, completedLessons = 
 
   return (
     <div className="container section page-block catalog-page">
+      <div className="home-mobile-only">
+        <MobileHeroCard variant="catalog" language={language} onClick={() => document.getElementById('catalog-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} />
+        <MobileCatalogHeading language={language} onAll={() => { setSearch(''); setCategory('all'); setLevel('all'); setSort('popular'); document.getElementById('catalog-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }} />
+      </div>
+      <div className="home-desktop-only">
       <PageHero
         back={<SmartBackButton fallback={fallbackPath} label={pick(language, 'Кайтуу', 'Назад', 'Back')} />}
         eyebrow={pick(language, 'Каталог', 'Каталог', 'Catalog')}
@@ -936,6 +960,7 @@ function CourseCatalogPage({ t, favorites, onToggleFavorite, completedLessons = 
           </div>
         )}
       />
+      </div>
       <div className="toolbar catalog-toolbar">
         <SearchBar value={search} onChange={setSearch} placeholder={t.catalog.search} ariaLabel={t.catalog.search} />
         <select value={category} onChange={(e) => setCategory(e.target.value)} aria-label={t.catalog.category}>
@@ -959,7 +984,7 @@ function CourseCatalogPage({ t, favorites, onToggleFavorite, completedLessons = 
           </button>
         ))}
       </div>
-      <p className="catalog-count">{pick(language, 'Табылды', 'Найдено', 'Found')}: <strong>{filteredCourses.length}</strong></p>
+      <p className="catalog-count" id="catalog-list">{pick(language, 'Табылды', 'Найдено', 'Found')}: <strong>{filteredCourses.length}</strong></p>
       <CourseList
         courses={filteredCourses}
         language={language}
@@ -969,6 +994,7 @@ function CourseCatalogPage({ t, favorites, onToggleFavorite, completedLessons = 
         backTo={coursesListPath}
         completedLessons={completedLessons}
       />
+      {siteStats && <div className="home-mobile-only"><MobileStatsCard siteStats={siteStats} language={language} /></div>}
     </div>
   )
 }
@@ -1035,7 +1061,7 @@ function CourseDetailPage({ t, completedLessons, onCourseComplete, subscription:
           <p>{course.description[language]}</p>
           <div className="meta-row">
             <span><SlidersHorizontal size={15} /> {levelLabel(course.level, language)}</span>
-            <span><Clock3 size={15} /> {course.duration}</span>
+            <span><Clock3 size={15} /> {formatWeeks(course.duration, language)}</span>
             <span><Star size={15} fill="currentColor" /> {course.rating}</span>
             <span><Users size={15} /> {course.students}</span>
             <span><PlayCircle size={15} /> {course.lessons.length} {t.home.lessons}</span>
@@ -1689,7 +1715,7 @@ function DashboardPage({ t, user, completedLessons, subscription, onUpdateProfil
                     <div className="course-pill" style={{ background: course.color, color: course.accent }}>{course.badge}</div>
                     <div>
                       <strong>{course.title[language]}</strong>
-                      <small>{course.duration}</small>
+                      <small>{formatWeeks(course.duration, language)}</small>
                     </div>
                     <span>{course.rating} ★</span>
                   </Link>
