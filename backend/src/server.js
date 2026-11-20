@@ -5,16 +5,40 @@ import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { config } from './config/config.js'
 import { db } from './config/db.js'
-import { activateSubscription, cancelSubscription, expireDueSubscriptions, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
-import { initTelegram, notifyPurchase, notifyPurchaseRequest, notifyRegistration, notifyReview, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
+import { activateSubscription, cancelSubscription, claimEndingSoonReminders, expireDueSubscriptions, extendSubscription, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
+import { initTelegram, notifyPurchase, notifyPurchaseRejected, notifyPurchaseRequest, notifyRegistration, notifyReview, orderCode, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
 import { QUESTION_NOT_ALLOWED_MESSAGE, getKnowledge, getPreparedAnswer, resolveAllowedQuestion } from './aiQuestions.js'
 import { aiConfig, clearAiHistory, deleteAiExchange, initAiHistory, listAiHistory, saveAiExchange } from './ai.js'
 import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './config/provider.js'
-import { sendEmail, buildPasswordResetEmail, buildPasswordChangedEmail, buildAdminResetCodeEmail, emailLanguage } from './config/email.js'
+import { sendEmail, buildBillingEmail, buildPasswordResetEmail, buildPasswordChangedEmail, buildAdminResetCodeEmail, emailLanguage } from './config/email.js'
 import { initAdminReset, registerAdminResetRoutes } from './adminReset.js'
 
 /** Public URL of the e-mail logo (frontend/public/email/levelup-logo.png). */
 const emailLogoUrl = () => (config.frontendUrl ? `${String(config.frontendUrl).replace(/\/+$/, '')}/email/levelup-logo.png` : '')
+const PLAN_NAMES = { free: 'FREE', pro: 'PRO', aipro: 'AI PRO' }
+
+/**
+ * Plan e-mail to the buyer (request received / activated / rejected / ending soon).
+ * Runs in the background: an SMTP problem never breaks the payment request.
+ */
+function sendBillingEmail(to, details) {
+  try {
+    const content = buildBillingEmail({
+      ...details,
+      planName: PLAN_NAMES[details.planId] ?? details.planId,
+      language: emailLanguage(details.language),
+      dashboardUrl: config.frontendUrl ? `${String(config.frontendUrl).replace(/\/+$/, '')}/dashboard` : '',
+      logoUrl: emailLogoUrl()
+    })
+    void sendEmail({ to, ...content }).catch((error) => {
+      // eslint-disable-next-line no-console
+      console.warn('[EMAIL] billing email failed:', error instanceof Error ? error.message : error)
+    })
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[EMAIL] billing email could not be prepared:', error instanceof Error ? error.message : error)
+  }
+}
 
 const app = express()
 
@@ -122,6 +146,17 @@ const adminApiLimiter = rateLimit({
 // ─── Database Prepared Statements ──────────────────────────────────────────────
 
 initBilling(db)
+// Course certificates: issued once per user and course, only for a fully completed course on PRO / AI PRO.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS certificates (
+    id TEXT PRIMARY KEY,
+    user_email TEXT NOT NULL,
+    course_id TEXT NOT NULL,
+    holder_name TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    UNIQUE (user_email, course_id)
+  );
+`)
 initAiHistory(db)
 initAdminReset(db)
 initTelegram(db)
@@ -2003,11 +2038,22 @@ app.patch('/api/admin/subscriptions/:userEmail', adminApiLimiter, requireAdminAu
     const grantId = `admin-grant-${crypto.randomUUID()}`
     const activation = activateSubscription(db, { userEmail, planId: plan.id, days: plan.durationDays, amount: 0, currency: plan.currency, paymentMethod: 'admin', orderId: grantId, transactionId: grantId, source: 'admin' })
     void notifySubscriptionActivated({ userEmail, planId: plan.id, kind: 'admin', subscription: activation.subscription, transactionId: grantId, paymentStatus: 'GRANTED BY ADMIN (no payment)', paymentMethod: 'Administrator', amount: 0, currency: plan.currency, dedupeKey: grantId })
+    sendBillingEmail(userEmail, { kind: 'activated', planId: plan.id, amount: 0, currency: plan.currency, paymentMethod: 'Administrator', endsAt: activation.subscription.ends_at })
     res.json({ ok: true, action: 'activated', planId: plan.id, kind: activation.kind })
     return
   }
 
-  res.status(400).json({ error: 'Invalid action. Use "activate" or "revoke".' })
+  if (action === 'extend') {
+    const result = extendSubscription(db, userEmail, req.body?.days, req.adminEmail)
+    if (result.error) {
+      res.status(result.status).json({ error: result.error, code: result.code })
+      return
+    }
+    res.json({ ok: true, action: 'extended', planId: result.subscription.plan_id, endsAt: result.subscription.ends_at })
+    return
+  }
+
+  res.status(400).json({ error: 'Invalid action. Use "activate", "extend" or "revoke".' })
 })
 
 // ─── ADMIN: Payments ──────────────────────────────────────────────────────────
@@ -2480,7 +2526,7 @@ app.get('/api/subscription/:userEmail/history', (req, res) => {
   `).all(userEmail)
   res.json({
     history: listHistory(db, userEmail),
-    orders: orders.map((o) => ({ orderId: o.id, planId: o.plan_id, amount: o.amount, currency: o.currency, paymentMethod: o.payment_method, status: o.status, activated: Boolean(o.is_activated), transactionId: o.transaction_id ?? null, createdAt: o.created_at, updatedAt: o.updated_at }))
+    orders: orders.map((o) => ({ orderId: o.id, orderCode: orderCode(o.id), provider: o.provider, reviewNote: o.status === 'failed' ? (o.review_note ?? null) : null, planId: o.plan_id, amount: o.amount, currency: o.currency, paymentMethod: o.payment_method, status: o.status, activated: Boolean(o.is_activated), transactionId: o.transaction_id ?? null, createdAt: o.created_at, updatedAt: o.updated_at }))
   })
 })
 
@@ -2496,12 +2542,14 @@ app.post('/api/subscription/:userEmail/cancel', (req, res) => {
 })
 
 /** Telegram message for an activation (payment or admin grant). Never throws. */
-function notifySubscriptionActivated({ userEmail, planId, kind, subscription, transactionId, paymentStatus, paymentMethod, amount, currency, dedupeKey, fullName, template, purchasedAt }) {
+function notifySubscriptionActivated({ userEmail, planId, kind, subscription, transactionId, paymentStatus, paymentMethod, amount, currency, dedupeKey, fullName, template, purchasedAt, orderId }) {
   try {
     const profile = db.prepare('SELECT rowid AS account_id, first_name, last_name FROM user_profiles WHERE user_email = ?').get(userEmail)
     const name = (fullName && String(fullName).trim()) || `${profile?.first_name ?? ''} ${profile?.last_name ?? ''}`.trim() || userEmail
     return notifyPurchase(db, {
       template,
+      orderId: orderId ?? subscription?.order_id ?? null,
+      durationDays: getPlanById(db, planId)?.durationDays ?? 30,
       kind,
       name,
       email: userEmail,
@@ -2621,7 +2669,8 @@ app.post('/api/payments/webhook/:provider', (req, res) => {
     return
   }
 
-  void notifySubscriptionActivated({ userEmail: order.user_email, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID', paymentMethod: order.payment_method, amount: order.amount, currency: order.currency, dedupeKey: transactionId })
+  void notifySubscriptionActivated({ userEmail: order.user_email, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID', paymentMethod: order.payment_method, amount: order.amount, currency: order.currency, dedupeKey: transactionId, orderId: order.id })
+  sendBillingEmail(order.user_email, { kind: 'activated', language: order.customer_language, planId: plan.id, amount: order.amount, currency: order.currency, paymentMethod: order.payment_method, orderCode: orderCode(order.id), endsAt: activation.subscription.ends_at })
   res.json({ ok: true, status: 'paid', activated: true, kind: activation.kind })
 })
 
@@ -2629,15 +2678,29 @@ app.post('/api/payments/webhook/:provider', (req, res) => {
 // Only transfer details are collected: payer name, bank reference, optional receipt note.
 // Card numbers / CVV / expiry are never requested or stored.
 
+// Wallet payments checked by hand: the buyer pays to the number below in their MBank / Элсом /
+// O!Деньги app, then sends the transaction number. These are public payment details, not secrets.
+const WALLET_METHODS = [
+  { id: 'MBank', env: 'MBANK' },
+  { id: 'Элсом', env: 'ELSOM' },
+  { id: 'O!Деньги', env: 'ODENGI' }
+]
+
 function manualTransferConfig() {
-  const account = String(process.env.MANUAL_TRANSFER_ACCOUNT ?? '').trim()
-  const enabled = String(process.env.MANUAL_TRANSFER_ENABLED ?? '').trim().toLowerCase() === 'true' && Boolean(account)
+  const env = (name) => String(process.env[name] ?? '').trim()
+  const account = env('MANUAL_TRANSFER_ACCOUNT')
+  const bankEnabled = env('MANUAL_TRANSFER_ENABLED').toLowerCase() === 'true' && Boolean(account)
+  const methods = WALLET_METHODS
+    .map((m) => ({ id: m.id, account: env(`PAYMENT_${m.env}_ACCOUNT`), recipient: env(`PAYMENT_${m.env}_RECIPIENT`) || env('MANUAL_TRANSFER_RECIPIENT'), instructions: env(`PAYMENT_${m.env}_INSTRUCTIONS`) }))
+    .filter((m) => m.account)
+  if (bankEnabled) methods.push({ id: 'Bank transfer', account, recipient: env('MANUAL_TRANSFER_RECIPIENT'), instructions: env('MANUAL_TRANSFER_INSTRUCTIONS'), bankName: env('MANUAL_TRANSFER_BANK_NAME') })
   return {
-    enabled,
-    bankName: String(process.env.MANUAL_TRANSFER_BANK_NAME ?? '').trim(),
-    recipient: String(process.env.MANUAL_TRANSFER_RECIPIENT ?? '').trim(),
+    enabled: methods.length > 0,
+    methods,
+    bankName: env('MANUAL_TRANSFER_BANK_NAME'),
+    recipient: env('MANUAL_TRANSFER_RECIPIENT'),
     account,
-    instructions: String(process.env.MANUAL_TRANSFER_INSTRUCTIONS ?? '').trim()
+    instructions: env('MANUAL_TRANSFER_INSTRUCTIONS')
   }
 }
 
@@ -2678,6 +2741,14 @@ app.post('/api/payments/manual', purchaseRequestLimiter, (req, res) => {
     res.status(503).json({ error: 'Bank transfer is not available right now.', code: 'MANUAL_NOT_CONFIGURED' })
     return
   }
+  // The method must be one with payment details configured. Old clients send none → bank transfer.
+  const requestedMethod = typeof req.body?.paymentMethod === 'string' && req.body.paymentMethod.trim() ? req.body.paymentMethod.trim() : 'Bank transfer'
+  const method = cfg.methods.find((m) => m.id === requestedMethod)
+  if (!method) {
+    res.status(400).json({ error: 'This payment method is not available right now.', code: 'METHOD_UNSUPPORTED', fields: ['paymentMethod'] })
+    return
+  }
+  const customerLanguage = emailLanguage(String(req.body?.language ?? '').trim().toLowerCase())
 
   const fullName = clampText(req.body?.fullName, 120).trim()
   const email = String(req.body?.email ?? '').trim().toLowerCase()
@@ -2732,9 +2803,9 @@ app.post('/api/payments/manual', purchaseRequestLimiter, (req, res) => {
   try {
     db.prepare(`
       INSERT INTO payment_orders (id, user_email, plan_id, payment_method, amount, currency, provider, status, is_activated,
-        customer_name, customer_email, payer_name, payment_reference, receipt_note, created_at, updated_at)
-      VALUES (?, ?, ?, 'Bank transfer', ?, ?, 'manual', 'pending', 0, ?, ?, ?, ?, ?, ?, ?)
-    `).run(orderId, sessionEmail, plan.id, plan.price, plan.currency, fullName, email, payerName, normalizedReference, receiptNote || null, nowIso, nowIso)
+        customer_name, customer_email, payer_name, payment_reference, receipt_note, customer_language, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'manual', 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(orderId, sessionEmail, plan.id, method.id, plan.price, plan.currency, fullName, email, payerName, normalizedReference, receiptNote || null, customerLanguage, nowIso, nowIso)
   } catch (error) {
     const message = error instanceof Error ? error.message : ''
     if (message.includes('payment_orders.payment_reference')) {
@@ -2749,15 +2820,17 @@ app.post('/api/payments/manual', purchaseRequestLimiter, (req, res) => {
     return
   }
 
-  recordHistory(db, { user_email: sessionEmail, event: 'manual_submitted', plan_id: plan.id, status: 'pending', amount: plan.price, currency: plan.currency, payment_method: 'Bank transfer', order_id: orderId, transaction_id: normalizedReference })
+  recordHistory(db, { user_email: sessionEmail, event: 'manual_submitted', plan_id: plan.id, status: 'pending', amount: plan.price, currency: plan.currency, payment_method: method.id, order_id: orderId, transaction_id: normalizedReference })
   // Admin is told a request is waiting; the plan is NOT active until it is approved.
-  void notifyPurchaseRequest(db, { orderId, name: fullName, email: sessionEmail, planId: plan.id, amount: plan.price, currency: plan.currency, reference: normalizedReference, createdAt: nowIso })
-  res.status(201).json({ orderId, status: 'pending', planId: plan.id, amount: plan.price, currency: plan.currency, paymentReference: normalizedReference })
+  void notifyPurchaseRequest(db, { orderId, name: fullName, email: sessionEmail, planId: plan.id, amount: plan.price, currency: plan.currency, reference: normalizedReference, createdAt: nowIso, durationDays: plan.durationDays, paymentMethod: method.id })
+  sendBillingEmail(sessionEmail, { kind: 'pending', language: customerLanguage, planId: plan.id, amount: plan.price, currency: plan.currency, paymentMethod: method.id, orderCode: orderCode(orderId) })
+  res.status(201).json({ orderId, orderCode: orderCode(orderId), status: 'pending', planId: plan.id, amount: plan.price, currency: plan.currency, paymentMethod: method.id, paymentReference: normalizedReference })
 })
 
 function formatPurchaseRequest(row) {
   return {
     id: row.id,
+    orderCode: orderCode(row.id),
     userEmail: row.user_email,
     fullName: row.customer_name || `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() || null,
     accountId: row.account_id != null ? `#${row.account_id}` : null,
@@ -2831,7 +2904,7 @@ app.post('/api/admin/purchase-requests/:id/approve', adminApiLimiter, requireAdm
         raw_payload: JSON.stringify({ approvedBy: req.adminEmail, payerName: order.payer_name, reference: order.payment_reference }),
         created_at: nowIso
       })
-      return activateSubscription(db, { userEmail: order.user_email, planId: plan.id, days: plan.durationDays, amount: order.amount, currency: order.currency, paymentMethod: 'Bank transfer', orderId: order.id, transactionId, source: 'manual' })
+      return activateSubscription(db, { userEmail: order.user_email, planId: plan.id, days: plan.durationDays, amount: order.amount, currency: order.currency, paymentMethod: order.payment_method || 'Bank transfer', orderId: order.id, transactionId, source: 'manual' })
     })()
   } catch (error) {
     const message = error instanceof Error ? error.message : ''
@@ -2848,7 +2921,9 @@ app.post('/api/admin/purchase-requests/:id/approve', adminApiLimiter, requireAdm
     return
   }
 
-  void notifySubscriptionActivated({ userEmail: order.user_email, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID', paymentMethod: 'Bank transfer (approved by administrator)', amount: order.amount, currency: order.currency, dedupeKey: `manual:${order.id}`, fullName: order.customer_name })
+  const methodLabel = order.payment_method || 'Bank transfer'
+  void notifySubscriptionActivated({ userEmail: order.user_email, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID', paymentMethod: `${methodLabel} (approved by administrator)`, amount: order.amount, currency: order.currency, dedupeKey: `manual:${order.id}`, fullName: order.customer_name, orderId: order.id, purchasedAt: order.created_at })
+  sendBillingEmail(order.user_email, { kind: 'activated', language: order.customer_language, planId: plan.id, amount: order.amount, currency: order.currency, paymentMethod: methodLabel, orderCode: orderCode(order.id), endsAt: activation.subscription.ends_at })
   res.json({ ok: true, status: 'paid', kind: activation.kind, endsAt: activation.subscription.ends_at })
 })
 
@@ -2866,7 +2941,10 @@ app.post('/api/admin/purchase-requests/:id/reject', adminApiLimiter, requireAdmi
     res.status(409).json({ error: `Request is already ${order.status}`, code: 'ALREADY_REVIEWED', status: order.status })
     return
   }
-  recordHistory(db, { user_email: order.user_email, event: 'payment_failed', plan_id: order.plan_id, status: 'failed', amount: order.amount, currency: order.currency, payment_method: 'Bank transfer', order_id: order.id, transaction_id: order.payment_reference })
+  const methodLabel = order.payment_method || 'Bank transfer'
+  recordHistory(db, { user_email: order.user_email, event: 'payment_failed', plan_id: order.plan_id, status: 'failed', amount: order.amount, currency: order.currency, payment_method: methodLabel, order_id: order.id, transaction_id: order.payment_reference })
+  void notifyPurchaseRejected(db, { orderId: order.id, name: order.customer_name || order.user_email, email: order.user_email, planId: order.plan_id, amount: order.amount, currency: order.currency, paymentMethod: methodLabel, reference: order.payment_reference, createdAt: order.created_at, durationDays: getPlanById(db, order.plan_id)?.durationDays ?? 30, note })
+  sendBillingEmail(order.user_email, { kind: 'rejected', language: order.customer_language, planId: order.plan_id, amount: order.amount, currency: order.currency, paymentMethod: methodLabel, orderCode: orderCode(order.id), note })
   res.json({ ok: true, status: 'failed' })
 })
 
@@ -2942,9 +3020,9 @@ app.post('/api/payments/demo', purchaseRequestLimiter, (req, res) => {
     activation = db.transaction(() => {
       db.prepare(`
         INSERT INTO payment_orders (id, user_email, plan_id, payment_method, amount, currency, provider, provider_order_id, provider_payment_id, status, is_activated,
-          customer_name, customer_email, created_at, updated_at)
-        VALUES (?, ?, ?, 'Demo Payment', ?, ?, 'demo', ?, ?, 'paid', 1, ?, ?, ?, ?)
-      `).run(orderId, sessionEmail, plan.id, plan.price, plan.currency, checkoutKey, transactionId, cardholderName, sessionEmail, nowIso, nowIso)
+          customer_name, customer_email, customer_language, created_at, updated_at)
+        VALUES (?, ?, ?, 'Demo Payment', ?, ?, 'demo', ?, ?, 'paid', 1, ?, ?, ?, ?, ?)
+      `).run(orderId, sessionEmail, plan.id, plan.price, plan.currency, checkoutKey, transactionId, cardholderName, sessionEmail, emailLanguage(String(req.body?.language ?? '').trim().toLowerCase()), nowIso, nowIso)
       insertPaymentStmt.run({
         id: crypto.randomUUID(),
         order_id: orderId,
@@ -2970,8 +3048,9 @@ app.post('/api/payments/demo', purchaseRequestLimiter, (req, res) => {
 
   // Telegram only after the order and the subscription were saved (the transaction above committed).
   const accountName = `${profile.first_name ?? ''} ${profile.last_name ?? ''}`.trim()
-  void notifySubscriptionActivated({ userEmail: sessionEmail, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID (demo)', paymentMethod: 'Demo Payment', amount: plan.price, currency: plan.currency, dedupeKey: `demo:${orderId}`, fullName: accountName || cardholderName, template: 'demo', purchasedAt: nowIso })
-  res.status(201).json({ orderId, transactionId, status: 'paid', planId: plan.id, kind: activation.kind, endsAt: activation.subscription.ends_at, accessPlan: plan.id, amount: plan.price, currency: plan.currency })
+  void notifySubscriptionActivated({ userEmail: sessionEmail, planId: plan.id, kind: activation.kind, subscription: activation.subscription, transactionId, paymentStatus: 'PAID (demo)', paymentMethod: 'Demo Payment', amount: plan.price, currency: plan.currency, dedupeKey: `demo:${orderId}`, fullName: accountName || cardholderName, template: 'demo', purchasedAt: nowIso, orderId })
+  sendBillingEmail(sessionEmail, { kind: 'demo', language: req.body?.language, planId: plan.id, amount: plan.price, currency: plan.currency, paymentMethod: 'DEMO', orderCode: orderCode(orderId), endsAt: activation.subscription.ends_at })
+  res.status(201).json({ orderId, orderCode: orderCode(orderId), transactionId, status: 'paid', demo: true, planId: plan.id, kind: activation.kind, endsAt: activation.subscription.ends_at, accessPlan: plan.id, amount: plan.price, currency: plan.currency })
 })
 
 app.get('/api/admin/purchases', adminApiLimiter, requireAdminAuth, (req, res) => {
@@ -2996,6 +3075,7 @@ app.get('/api/admin/purchases', adminApiLimiter, requireAdminAuth, (req, res) =>
   res.json({
     purchases: rows.map((row) => ({
       orderId: row.id,
+      orderCode: orderCode(row.id),
       userName: `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() || row.customer_name || null,
       userEmail: row.user_email,
       planId: row.plan_id,
@@ -3009,6 +3089,76 @@ app.get('/api/admin/purchases', adminApiLimiter, requireAdminAuth, (req, res) =>
     })),
     generatedAt: new Date().toISOString()
   })
+})
+
+// ─── Certificates ─────────────────────────────────────────────────────────────
+
+function formatCertificate(row) {
+  return {
+    id: row.id,
+    courseId: row.course_id,
+    courseTitle: { kg: row.title_kg, ru: row.title_ru, en: row.title_en },
+    holderName: row.holder_name,
+    issuedAt: row.issued_at
+  }
+}
+
+/**
+ * The signed-in user's certificates. Completed courses get a certificate the first time this is
+ * called — but only while the user has PRO / AI PRO (or is the admin). Completion comes from
+ * course_progress, which the server itself caps at the lessons the user's plan allows.
+ */
+app.get('/api/certificates', (req, res) => {
+  const userEmail = resolveAuthenticatedUserEmail(req)
+  if (!userEmail) {
+    res.status(401).json({ error: 'Authentication required' })
+    return
+  }
+  const profile = getUserProfileStmt.get(userEmail)
+  const isAdmin = Boolean(profile && userEmail === config.adminEmail && normalizeRoleName(profile.role) === 'Admin')
+  const plan = getAccessPlan(db, userEmail)
+  const canEarn = isAdmin || plan === 'pro' || plan === 'aipro'
+  const completed = db.prepare(`
+    SELECT cp.course_id FROM course_progress cp
+    JOIN courses c ON c.id = cp.course_id
+    WHERE cp.user_email = ? AND cp.status = 'completed'
+  `).all(userEmail)
+
+  if (canEarn && completed.length) {
+    const holderName = `${profile?.first_name ?? ''} ${profile?.last_name ?? ''}`.trim() || userEmail
+    const insert = db.prepare('INSERT OR IGNORE INTO certificates (id, user_email, course_id, holder_name, issued_at) VALUES (?, ?, ?, ?, ?)')
+    const nowIso = new Date().toISOString()
+    db.transaction(() => {
+      for (const row of completed) insert.run(`LU-CERT-${crypto.randomBytes(5).toString('hex').toUpperCase()}`, userEmail, row.course_id, holderName, nowIso)
+    })()
+  }
+
+  const certificates = db.prepare(`
+    SELECT ce.*, c.title_kg, c.title_ru, c.title_en FROM certificates ce
+    LEFT JOIN courses c ON c.id = ce.course_id
+    WHERE ce.user_email = ? ORDER BY datetime(ce.issued_at) DESC
+  `).all(userEmail)
+  res.json({
+    canEarn,
+    plan,
+    completedCourses: completed.length,
+    // Completed courses still waiting for a paid plan to unlock their certificate.
+    lockedCourses: canEarn ? 0 : completed.filter((row) => !certificates.some((c) => c.course_id === row.course_id)).length,
+    certificates: certificates.map(formatCertificate)
+  })
+})
+
+/** Public check that a certificate is genuine (shown on the certificate itself). */
+app.get('/api/certificates/verify/:id', (req, res) => {
+  const id = String(req.params.id ?? '').trim().toUpperCase()
+  const row = /^LU-CERT-[0-9A-F]{10}$/.test(id)
+    ? db.prepare('SELECT ce.*, c.title_kg, c.title_ru, c.title_en FROM certificates ce LEFT JOIN courses c ON c.id = ce.course_id WHERE ce.id = ?').get(id)
+    : null
+  if (!row) {
+    res.status(404).json({ valid: false, error: 'Certificate not found' })
+    return
+  }
+  res.json({ valid: true, certificate: formatCertificate(row) })
 })
 
 // ─── User Profile & Course Progress Endpoints ─────────────────────────────────
@@ -3496,8 +3646,22 @@ setInterval(pruneExpiredAuthRows, 6 * 60 * 60 * 1000).unref()
 
 // Paid subscriptions past their end date become 'expired' (also checked on every read).
 expireDueSubscriptions(db)
+// "Your plan ends in N days" e-mail: once per paid period, 3 days before the end.
+function remindEndingPlans() {
+  try {
+    for (const row of claimEndingSoonReminders(db, 3)) {
+      const lastOrder = db.prepare('SELECT customer_language FROM payment_orders WHERE user_email = ? ORDER BY datetime(created_at) DESC LIMIT 1').get(row.user_email)
+      sendBillingEmail(row.user_email, { kind: 'expiring', language: lastOrder?.customer_language, planId: row.plan_id, endsAt: row.ends_at, daysLeft: row.daysLeft })
+    }
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error('[BILLING] reminder check failed:', error instanceof Error ? error.message : error)
+  }
+}
+remindEndingPlans()
 setInterval(() => {
   try { expireDueSubscriptions(db) } catch (error) { console.error('[BILLING] expiry check failed:', error instanceof Error ? error.message : error) }
+  remindEndingPlans()
 }, 10 * 60 * 1000).unref()
 
 ensureSeedUsers()

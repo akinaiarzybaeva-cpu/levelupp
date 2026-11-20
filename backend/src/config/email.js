@@ -148,6 +148,63 @@ export function buildPasswordChangedEmail({ isAdmin = false, language = 'ru', lo
   return { html, text, subject: T.changedSubject(isAdmin) }
 }
 
+// ─── Plan purchase emails (request received, activated, rejected, ending soon) ───
+const BILLING_TEXT = {
+  ru: {
+    plan: 'Тариф', amount: 'Сумма', method: 'Способ оплаты', order: 'Order ID', until: 'Действует до', reason: 'Причина',
+    pending: { subject: (p) => `LevelUp — заявка на тариф ${p} получена`, title: 'Заявка на оплату получена', intro: 'Мы получили вашу заявку. Тариф активируется после того, как администратор проверит платёж — обычно это занимает до нескольких часов. Мы сообщим вам по email.' },
+    activated: { subject: (p) => `LevelUp — тариф ${p} активирован`, title: 'Тариф активирован', intro: 'Оплата подтверждена. Все возможности тарифа уже открыты в вашем аккаунте.' },
+    demo: { subject: (p) => `LevelUp — тариф ${p} активирован (DEMO)`, title: 'Тариф активирован (DEMO)', intro: 'Это DEMO-покупка: деньги не списывались. Тариф включён для проверки работы платформы.' },
+    rejected: { subject: (p) => `LevelUp — оплата тарифа ${p} не подтверждена`, title: 'Оплата не подтверждена', intro: 'Администратор не нашёл ваш платёж, поэтому тариф не был активирован. Если вы уже оплатили, ответьте на это письмо или отправьте заявку снова с правильным номером транзакции.' },
+    expiring: { subject: (p) => `LevelUp — тариф ${p} скоро закончится`, title: 'Тариф скоро закончится', intro: (d) => `До окончания вашего тарифа осталось ${d} дн. Продлите его в личном кабинете, чтобы не потерять доступ к урокам.` }
+  },
+  kg: {
+    plan: 'Тариф', amount: 'Сумма', method: 'Төлөм ыкмасы', order: 'Order ID', until: 'Чейин активдүү', reason: 'Себеби',
+    pending: { subject: (p) => `LevelUp — ${p} тарифине өтүнмө кабыл алынды`, title: 'Төлөм өтүнмөсү кабыл алынды', intro: 'Өтүнмөңүз кабыл алынды. Администратор төлөмдү текшергенден кийин тариф активдешет — адатта бир нече саатка чейин. Биз сизге email аркылуу кабарлайбыз.' },
+    activated: { subject: (p) => `LevelUp — ${p} тарифи активдештирилди`, title: 'Тариф активдештирилди', intro: 'Төлөм ырасталды. Тарифтин бардык мүмкүнчүлүктөрү аккаунтуңузда ачылды.' },
+    demo: { subject: (p) => `LevelUp — ${p} тарифи активдештирилди (DEMO)`, title: 'Тариф активдештирилди (DEMO)', intro: 'Бул DEMO-сатып алуу: акча алынган жок. Тариф платформаны текшерүү үчүн күйгүзүлдү.' },
+    rejected: { subject: (p) => `LevelUp — ${p} тарифинин төлөмү ырасталган жок`, title: 'Төлөм ырасталган жок', intro: 'Администратор төлөмүңүздү тапкан жок, ошондуктан тариф активдешкен жок. Эгер төлөп койгон болсоңуз, бул катка жооп бериңиз же туура транзакция номери менен кайра өтүнмө жөнөтүңүз.' },
+    expiring: { subject: (p) => `LevelUp — ${p} тарифинин мөөнөтү бүтүп баратат`, title: 'Тарифтин мөөнөтү бүтүп баратат', intro: (d) => `Тарифиңиздин бүтүшүнө ${d} күн калды. Сабактарга жеткиликтүүлүктү жоготпош үчүн жеке кабинеттен узартыңыз.` }
+  },
+  en: {
+    plan: 'Plan', amount: 'Amount', method: 'Payment method', order: 'Order ID', until: 'Active until', reason: 'Reason',
+    pending: { subject: (p) => `LevelUp — your ${p} request was received`, title: 'Payment request received', intro: 'We received your request. The plan is activated once the administrator verifies the payment — usually within a few hours. We will let you know by email.' },
+    activated: { subject: (p) => `LevelUp — ${p} plan activated`, title: 'Plan activated', intro: 'Your payment is confirmed. Every feature of the plan is now unlocked in your account.' },
+    demo: { subject: (p) => `LevelUp — ${p} plan activated (DEMO)`, title: 'Plan activated (DEMO)', intro: 'This was a DEMO purchase: no money was charged. The plan is switched on for testing the platform.' },
+    rejected: { subject: (p) => `LevelUp — ${p} payment not confirmed`, title: 'Payment not confirmed', intro: 'The administrator could not find your payment, so the plan was not activated. If you have already paid, reply to this email or send the request again with the correct transaction number.' },
+    expiring: { subject: (p) => `LevelUp — your ${p} plan ends soon`, title: 'Your plan ends soon', intro: (d) => `Your plan ends in ${d} day(s). Renew it in your dashboard to keep access to the lessons.` }
+  }
+}
+
+/**
+ * kind: 'pending' | 'activated' | 'demo' | 'rejected' | 'expiring'.
+ * Contains only plan / order details — never card data.
+ */
+export function buildBillingEmail({ kind, language = 'ru', planName, amount, currency = 'KGS', paymentMethod, orderCode, endsAt, note, daysLeft, dashboardUrl = '', logoUrl = '' }) {
+  const lang = emailLanguage(language)
+  const T = BILLING_TEXT[lang]
+  const K = T[kind] ?? T.activated
+  const intro = typeof K.intro === 'function' ? K.intro(daysLeft ?? 3) : K.intro
+  const endsText = endsAt ? new Date(endsAt).toLocaleString(lang === 'en' ? 'en-GB' : 'ru-RU', { timeZone: 'Asia/Bishkek', year: 'numeric', month: '2-digit', day: '2-digit' }) : ''
+  const rows = [
+    [T.plan, planName],
+    amount != null && kind !== 'expiring' ? [T.amount, `${amount} ${currency === 'KGS' ? 'сом' : currency}`] : null,
+    paymentMethod && kind !== 'expiring' ? [T.method, paymentMethod] : null,
+    orderCode ? [T.order, orderCode] : null,
+    endsText && (kind === 'activated' || kind === 'demo' || kind === 'expiring') ? [T.until, endsText] : null,
+    note && kind === 'rejected' ? [T.reason, note] : null
+  ].filter(Boolean)
+  const table = rows.map(([k, v]) => `<tr><td style="padding:8px 0;color:#6b7a88">${escHtml(k)}</td><td style="padding:8px 0;text-align:right;font-weight:700;color:#06281d">${escHtml(v)}</td></tr>`).join('')
+  const tone = kind === 'rejected' ? 'background:#fdecec;color:#9b1c1c' : kind === 'expiring' || kind === 'pending' ? 'background:#fff4e5;color:#8a4b00' : 'background:#e7f8ee;color:#06281d'
+  const button = dashboardUrl ? `<p style="margin:22px 0 0;text-align:center"><a href="${escHtml(dashboardUrl)}" style="display:inline-block;background:#0b7f4a;color:#ffffff;text-decoration:none;padding:13px 28px;border-radius:999px;font-weight:700;font-size:15px">LevelUp</a></p>` : ''
+  const body = `
+    <p style="margin:0 0 18px;padding:12px 14px;border-radius:12px;font-size:14px;${tone}">${escHtml(intro)}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e3ece7">${table}</table>${button}`
+  const html = emailLayout({ lang, logoUrl, title: K.title, body })
+  const text = `${K.title}\n\n${intro}\n\n${rows.map(([k, v]) => `${k}: ${v}`).join('\n')}${dashboardUrl ? `\n\n${dashboardUrl}` : ''}`
+  return { html, text, subject: K.subject(planName) }
+}
+
 // One-time 6-digit code for the administrator password reset.
 const CODE_TEXT = {
   ru: {

@@ -5,17 +5,18 @@ import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate,
 import { API_BASE_URL, AUTH_TOKEN_KEY, getStoredAuthToken, isNetworkError } from './api'
 import { courses as bundledCourses, type Course } from './data'
 // Optimised 384px WebP of assets/лого.png (826 KB -> ~21 KB); displayed at <=170px wide.
-import { ApiError, cancelServerSubscription, createPaymentOrder, getManualTransferConfig, getPaymentOrderStatus, submitManualTransfer, type ManualTransferConfig, getPlans, getReviewsFromServer, getServerSubscription, getSubscriptionHistory, saveReviewToServer, type SubscriptionHistory } from './paymentApi'
+import { ApiError, cancelServerSubscription, createPaymentOrder, getCertificates, type Certificate, type CertificatesResponse, getManualTransferConfig, getPaymentOrderStatus, submitManualTransfer, type ManualTransferConfig, getPlans, getReviewsFromServer, getServerSubscription, getSubscriptionHistory, saveReviewToServer, type SubscriptionHistory } from './paymentApi'
 import { archiveExpiredPlans, getDefaultSubscription, getRemainingDays, getUserSubscription, PLAN_META, setUserSubscription, type PaymentMethod, type UserSubscription } from './subscriptionService'
 import AdminLogin from './components/AdminLogin'
 import PaymentModal, { useDemoPaymentEnabled } from './components/PaymentModal'
+import PurchaseModal from './components/PurchaseModal'
 import AdminResetPassword from './components/AdminResetPassword'
 import './components/AdminPanel.css'
 
 // The admin panel is large and only used by the administrator, so it is loaded on demand.
 const AdminPanel = lazy(() => import('./components/AdminPanel'))
 
-import { defaultNotificationSettings, defaultReviews, faqData, translations, getStoredValue, setStoredValue, getStoredLastAuthEmail, setStoredLastAuthEmail, resolveSafeNextPath, appendFromParam, fetchJson, formatCompactNumber, AnimatedMetric, SmartBackButton, isAdminRole, sanitizeReviews, buildReviewLessonOptions, createEmptyProgress, renderAvatarContent, buildLeaderboard, getCurrentUserProgress, LanguageContext, LanguageSetterContext, useLanguage, pick, levelLabel, normalizeLanguage, buildCourseCatalog, CourseCatalogContext, useCourseCatalog, bundledPlans, PLAN_RANK, GUEST_LESSON_LIMIT, BillingContext, useBilling, accessPlanOf, useLessonLimit, formatDateTime, subscriptionStatusText, paymentStatusText, historyEventText, UpgradeRequiredModal, mapApiCourse, hasActiveAiAccess, type Lang, type Theme, type UserProfile, type NotificationSettings, type UserProgress, type SiteStats, type LeaderboardEntry, type Review, type CourseCatalog, type ApiCourse, type PlanView, type BillingState } from './appShared'
+import { planPeriodLabel, defaultNotificationSettings, defaultReviews, faqData, translations,getStoredValue, setStoredValue, getStoredLastAuthEmail, setStoredLastAuthEmail, resolveSafeNextPath, appendFromParam, fetchJson, formatCompactNumber, AnimatedMetric, SmartBackButton, isAdminRole, sanitizeReviews, buildReviewLessonOptions, createEmptyProgress, renderAvatarContent, buildLeaderboard, getCurrentUserProgress, LanguageContext, LanguageSetterContext, useLanguage, pick, levelLabel, normalizeLanguage, buildCourseCatalog, CourseCatalogContext, useCourseCatalog, bundledPlans, PLAN_RANK, GUEST_LESSON_LIMIT, BillingContext, useBilling, accessPlanOf, useLessonLimit, formatDateTime, subscriptionStatusText, paymentStatusText, historyEventText, UpgradeRequiredModal, mapApiCourse, hasActiveAiAccess, type Lang, type Theme, type UserProfile, type NotificationSettings, type UserProgress, type SiteStats, type LeaderboardEntry, type Review, type CourseCatalog, type ApiCourse, type PlanView, type BillingState } from './appShared'
 import HeroSection, { HeroIllustration } from './components/HeroSection'
 import Sidebar from './components/Sidebar'
 import Logo from './components/Logo'
@@ -25,7 +26,6 @@ import ForgotPassword from './components/ForgotPassword'
 import LessonVideo from './components/LessonVideo'
 import LessonNavigation from './components/LessonNavigation'
 import LessonCard from './components/LessonCard'
-import QuizCard from './components/QuizCard'
 import SearchBar from './components/SearchBar'
 import CourseList from './components/CourseList'
 import Notification from './components/Notification'
@@ -557,8 +557,9 @@ function AppShell() {
     isLoggedIn,
     isAdmin: isAdminUser,
     userEmail: user?.email ?? null,
+    userName: user?.name ?? null,
     refreshSubscription
-  }), [plans, currentUserSubscription, isLoggedIn, isAdminUser, user?.email, refreshSubscription])
+  }), [plans, currentUserSubscription, isLoggedIn, isAdminUser, user?.email, user?.name, refreshSubscription])
 
   return (
     <LanguageContext.Provider value={language}>
@@ -1271,8 +1272,6 @@ function LessonPage({ t, completedLessons, subscription: _subscription, isLogged
           />
 
           <LessonNavigation previousLesson={previousLesson} nextLesson={nextLesson} isCompleted={isCompleted} language={language} onOpen={(id) => navigate(lessonPath(id))} />
-
-          <LessonMaterials key={lesson.id} t={t} lesson={lesson} />
         </div>
 
         <aside className="lesson-sidebar">
@@ -1788,6 +1787,7 @@ function DashboardPage({ t, user, completedLessons, subscription, onUpdateProfil
           </section>
 
           <SubscriptionPanel />
+          <CertificatesPanel />
         </main>
       </div>
 
@@ -3073,37 +3073,6 @@ function HomeCourseRow({ course, t, isTop }: { course: Course; t: (typeof transl
   )
 }
 
-/** Theory, code example, practice task and quiz for a lesson. */
-function LessonMaterials({ t, lesson }: { t: (typeof translations)[Lang]; lesson: Course['lessons'][number] }) {
-  const language = useLanguage()
-  const quiz = lesson.quiz
-  const hasQuiz = Boolean(quiz && quiz.options.length > 0)
-
-  return (
-    <div className="lesson-materials">
-      {lesson.theory && (
-        <section className="detail-card lesson-material-card">
-          <h3>{t.sections.theory}</h3>
-          <p>{lesson.theory}</p>
-        </section>
-      )}
-      {lesson.code && (
-        <section className="detail-card lesson-material-card">
-          <h3>{t.sections.codeExample}</h3>
-          <pre className="lesson-code"><code>{lesson.code}</code></pre>
-        </section>
-      )}
-      {lesson.task && (
-        <section className="detail-card lesson-material-card">
-          <h3>{t.sections.practice}</h3>
-          <p>{lesson.task}</p>
-        </section>
-      )}
-      {hasQuiz && quiz && <QuizCard quiz={quiz} t={t} language={language} />}
-    </div>
-  )
-}
-
 /** "My subscription" card on the dashboard — all values come from the backend. */
 function SubscriptionPanel() {
   const language = useLanguage()
@@ -3113,9 +3082,12 @@ function SubscriptionPanel() {
   const [confirmCancel, setConfirmCancel] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [renewOpen, setRenewOpen] = useState(false)
   const current = accessPlanOf(subscription)
   const plan = plans.find((item) => item.id === current) ?? bundledPlans[0]
   const raw = subscription.rawStatus ?? 'free'
+  const daysLeft = subscription.remainingDays ?? 0
+  const endingSoon = current !== 'free' && daysLeft <= 3
 
   const loadHistory = useCallback(async () => {
     if (!userEmail) return
@@ -3147,17 +3119,27 @@ function SubscriptionPanel() {
   const statusTone = raw === 'active' ? 'green' : raw === 'cancelled' ? 'gold' : raw === 'expired' ? 'danger' : 'neutral'
 
   return (
-    <section className="detail-card subscription-panel" id="subscription" aria-label={pick(language, 'Менин жазылуум', 'Моя подписка', 'My subscription')}>
+    <section className={`detail-card subscription-panel plan-${current}`} id="subscription" aria-label={pick(language, 'Менин тарифим', 'Мой тариф', 'My plan')}>
       <div className="card-header-row">
-        <h3><Crown size={20} /> {pick(language, 'Менин жазылуум', 'Моя подписка', 'My subscription')}</h3>
+        <h3><Crown size={20} /> {pick(language, 'Менин тарифим', 'Мой тариф', 'My plan')}</h3>
         <Badge tone={statusTone}>{subscriptionStatusText(subscription, language)}</Badge>
       </div>
+
+      {endingSoon && (
+        <div className="plan-expiry-warning" role="alert">
+          <Clock3 size={18} />
+          <span>{daysLeft <= 0
+            ? pick(language, 'Тарифиңиз бүгүн бүтөт. Жеткиликтүүлүктү жоготпош үчүн узартыңыз.', 'Ваш тариф заканчивается сегодня. Продлите его, чтобы не потерять доступ.', 'Your plan ends today. Renew it to keep access.')
+            : pick(language, `Тарифиңиздин бүтүшүнө ${daysLeft} күн калды. Жеткиликтүүлүктү жоготпош үчүн узартыңыз.`, `До окончания тарифа осталось ${daysLeft} дн. Продлите его, чтобы не потерять доступ.`, `Your plan ends in ${daysLeft} day(s). Renew it to keep access.`)}</span>
+        </div>
+      )}
 
       <div className="subscription-panel-grid">
         <div className="subscription-panel-plan">
           <span className="plan-tag">{PLAN_META[current].name}</span>
           <strong>{plan.label[language]}</strong>
-          {current !== 'free' && <span className="subscription-days"><b>{subscription.remainingDays ?? 0}</b> {pick(language, 'күн калды', 'дн. осталось', 'days left')}</span>}
+          <span className="subscription-price">{current === 'free' ? pick(language, '0 сом', '0 сом', '0 KGS') : `${plan.price} ${plan.currency === 'KGS' ? 'сом' : plan.currency}`} <small>/ {planPeriodLabel(plan, language, translations[language])}</small></span>
+          {current !== 'free' && <span className="subscription-days"><b>{daysLeft}</b> {pick(language, 'күн калды', 'дн. осталось', 'days left')}</span>}
         </div>
         <dl className="subscription-panel-dates">
           <div><dt>{pick(language, 'Сатып алынган күнү', 'Дата покупки', 'Purchased')}</dt><dd>{formatDateTime(subscription.purchasedAt, language, true)}</dd></div>
@@ -3170,7 +3152,9 @@ function SubscriptionPanel() {
       {subscription.pendingOrder && (
         <div className="checkout-pending-note" role="status">
           <Clock3 size={18} />
-          <span>{pick(language, 'Бүтпөгөн төлөм бар', 'Есть незавершённая оплата', 'There is an unfinished payment')}: {PLAN_META[subscription.pendingOrder.planId]?.name} · {subscription.pendingOrder.amount} сом</span>
+          <span>{subscription.pendingOrder.provider === 'manual'
+            ? pick(language, 'Төлөм текшерилүүдө', 'Платёж на проверке', 'Payment under review')
+            : pick(language, 'Бүтпөгөн төлөм бар', 'Есть незавершённая оплата', 'There is an unfinished payment')}: {PLAN_META[subscription.pendingOrder.planId]?.name} · {subscription.pendingOrder.amount} сом · {subscription.pendingOrder.paymentMethod}{subscription.pendingOrder.orderCode ? ` · ${subscription.pendingOrder.orderCode}` : ''}</span>
           <Link className="text-link" to={`/pricing/checkout/${subscription.pendingOrder.planId}?orderId=${encodeURIComponent(subscription.pendingOrder.orderId)}`}>{pick(language, 'Статусту көрүү', 'Посмотреть статус', 'View status')}</Link>
         </div>
       )}
@@ -3181,15 +3165,15 @@ function SubscriptionPanel() {
       </div>
 
       <div className="subscription-panel-actions">
-        {current === 'free' && <ButtonLink to="/pricing" icon={Rocket}>{pick(language, 'Тариф тандоо', 'Выбрать тариф', 'Choose a plan')}</ButtonLink>}
-        {current !== 'free' && <ButtonLink to={`/pricing/checkout/${current}`} icon={RefreshCw}>{pick(language, 'Узартуу', 'Продлить подписку', 'Renew')}</ButtonLink>}
-        {current === 'pro' && <ButtonLink to="/pricing/checkout/aipro" variant="secondary" icon={Bot}>{pick(language, 'AI PRO тарифине өтүү', 'Перейти на AI PRO', 'Upgrade to AI PRO')}</ButtonLink>}
+        {current === 'free' && <ButtonLink to="/dashboard/pricing" icon={Rocket}>{pick(language, 'PRO тарифине өтүү', 'Перейти на PRO', 'Upgrade to PRO')}</ButtonLink>}
+        {current !== 'free' && <Button icon={RefreshCw} onClick={() => setRenewOpen(true)}>{pick(language, 'Тарифти узартуу', 'Продлить тариф', 'Renew plan')}</Button>}
+        {current !== 'free' && <ButtonLink to="/dashboard/pricing" variant="secondary" icon={SlidersHorizontal}>{pick(language, 'Тарифти өзгөртүү', 'Изменить тариф', 'Change plan')}</ButtonLink>}
         {raw === 'active' && current !== 'free' && <Button variant="ghost" size="sm" onClick={() => setConfirmCancel(true)}>{pick(language, 'Жазылууну жокко чыгаруу', 'Отменить подписку', 'Cancel subscription')}</Button>}
       </div>
       <Notification message={notice} role="status" />
 
       <details className="subscription-history">
-        <summary>{pick(language, 'Жазылуу жана төлөм тарыхы', 'История подписки и платежей', 'Subscription & payment history')}</summary>
+        <summary>{pick(language, 'Сатып алуу жана төлөм тарыхы', 'История покупок и платежей', 'Purchase & payment history')}</summary>
         <Notification message={historyError} tone="error" />
         {history && history.history.length === 0 && history.orders.length === 0 && <p className="field-note">{pick(language, 'Азырынча эч нерсе жок.', 'Пока ничего нет.', 'Nothing yet.')}</p>}
         {history && history.history.length > 0 && (
@@ -3208,14 +3192,16 @@ function SubscriptionPanel() {
             <ul className="history-list">
               {history.orders.map((order) => (
                 <li key={order.orderId}>
-                  <span><b>{PLAN_META[order.planId]?.name ?? order.planId}</b> · {order.amount} сом · {order.paymentMethod} · {paymentStatusText(order.status, language)}</span>
-                  <small>{formatDateTime(order.createdAt, language, true)}{order.transactionId ? ` · ID ${order.transactionId}` : ''}</small>
+                  <span><b>{PLAN_META[order.planId]?.name ?? order.planId}</b> · {order.amount} сом · {order.paymentMethod} · <span className={`order-status order-status-${order.status}`}>{paymentStatusText(order.status, language)}</span></span>
+                  <small>{order.orderCode ? `${order.orderCode} · ` : ''}{formatDateTime(order.createdAt, language, true)}{order.reviewNote ? ` · ${pick(language, 'Себеби', 'Причина', 'Reason')}: ${order.reviewNote}` : ''}</small>
                 </li>
               ))}
             </ul>
           </>
         )}
       </details>
+
+      {current !== 'free' && <PurchaseModal open={renewOpen} onClose={() => { setRenewOpen(false); void loadHistory() }} plan={plan} language={language} />}
 
       <Modal
         open={confirmCancel}
@@ -3230,6 +3216,88 @@ function SubscriptionPanel() {
         )}
       >
         <p>{pick(language, `Тариф ${formatDateTime(subscription.endsAt, language)} чейин иштей берет, андан кийин акысыз тарифке өтөсүз. Акча автоматтык түрдө кайтарылбайт.`, `Тариф продолжит работать до ${formatDateTime(subscription.endsAt, language)}, затем вы перейдёте на бесплатный. Деньги автоматически не возвращаются.`, `Your plan keeps working until ${formatDateTime(subscription.endsAt, language)}, then you move to the free plan. No automatic refund is made.`)}</p>
+      </Modal>
+    </section>
+  )
+}
+
+/** Course certificates: issued by the server for completed courses on PRO / AI PRO. */
+function CertificatesPanel() {
+  const language = useLanguage()
+  const { subscription, isLoggedIn } = useBilling()
+  const [data, setData] = useState<CertificatesResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [openCert, setOpenCert] = useState<Certificate | null>(null)
+  const current = accessPlanOf(subscription)
+
+  useEffect(() => {
+    if (!isLoggedIn) return
+    let active = true
+    getCertificates()
+      .then((result) => { if (active) { setData(result); setError(null) } })
+      .catch((err) => { if (active) setError(err instanceof Error ? err.message : String(err)) })
+    return () => { active = false }
+  }, [isLoggedIn, current])
+
+  const certificates = data?.certificates ?? []
+  return (
+    <section className="detail-card certificates-panel" aria-label={pick(language, 'Сертификаттар', 'Сертификаты', 'Certificates')}>
+      <div className="card-header-row">
+        <h3><Award size={20} /> {pick(language, 'Сертификаттар', 'Сертификаты', 'Certificates')}</h3>
+        <span className="achievements-count">{certificates.length}</span>
+      </div>
+      <Notification message={error} tone="error" />
+      {data && !data.canEarn && (
+        <div className="certificate-locked">
+          <Lock size={18} />
+          <span>{pick(language, 'Сертификаттар PRO жана AI PRO тарифтеринде курсту толук бүтүргөндө берилет.', 'Сертификаты выдаются на тарифах PRO и AI PRO после полного прохождения курса.', 'Certificates are issued on PRO and AI PRO after completing a full course.')}</span>
+          <Link to="/dashboard/pricing" className="text-link">{pick(language, 'PRO тарифине өтүү', 'Перейти на PRO', 'Upgrade to PRO')}</Link>
+        </div>
+      )}
+      {data && data.canEarn && certificates.length === 0 && (
+        <p className="field-note">{pick(language, 'Курсту толук бүтүргөндөн кийин сертификатыңыз ушул жерде пайда болот.', 'Сертификат появится здесь после полного прохождения курса.', 'Your certificate will appear here after you complete a course.')}</p>
+      )}
+      {certificates.length > 0 && (
+        <ul className="certificate-list">
+          {certificates.map((cert) => (
+            <li key={cert.id}>
+              <span className="certificate-icon"><BadgeCheck size={20} /></span>
+              <div>
+                <strong>{cert.courseTitle[language] || cert.courseId}</strong>
+                <small>{cert.id} · {formatDateTime(cert.issuedAt, language)}</small>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => setOpenCert(cert)}>{pick(language, 'Ачуу', 'Открыть', 'Open')}</Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <Modal
+        open={openCert !== null}
+        onClose={() => setOpenCert(null)}
+        icon={Award}
+        title={pick(language, 'Сертификат', 'Сертификат', 'Certificate')}
+        actions={(
+          <>
+            <Button variant="secondary" size="sm" onClick={() => setOpenCert(null)}>{pick(language, 'Жабуу', 'Закрыть', 'Close')}</Button>
+            <Button size="sm" onClick={() => window.print()}>{pick(language, 'Басып чыгаруу / PDF', 'Печать / PDF', 'Print / PDF')}</Button>
+          </>
+        )}
+      >
+        {openCert && (
+          <div className="certificate-sheet">
+            <span className="certificate-brand">LEVEL UP</span>
+            <h2>{pick(language, 'СЕРТИФИКАТ', 'СЕРТИФИКАТ', 'CERTIFICATE')}</h2>
+            <p>{pick(language, 'Бул сертификат төмөнкүгө берилди', 'Настоящим подтверждается, что', 'This certifies that')}</p>
+            <strong className="certificate-holder">{openCert.holderName}</strong>
+            <p>{pick(language, 'курсту ийгиликтүү аяктады', 'успешно завершил(а) курс', 'has successfully completed the course')}</p>
+            <strong className="certificate-course">{openCert.courseTitle[language] || openCert.courseId}</strong>
+            <div className="certificate-meta">
+              <span>{formatDateTime(openCert.issuedAt, language)}</span>
+              <span>ID: {openCert.id}</span>
+            </div>
+          </div>
+        )}
       </Modal>
     </section>
   )

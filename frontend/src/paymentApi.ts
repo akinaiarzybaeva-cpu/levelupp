@@ -32,7 +32,7 @@ type ApiSubscriptionResponse = {
   accessPlan: SubscriptionPlanId
   hasAccess: boolean
   remainingDays: number
-  pendingOrder: { orderId: string; planId: SubscriptionPlanId; amount: number; paymentMethod: string; createdAt: string; paymentUrl: string | null; provider?: string; paymentReference?: string | null } | null
+  pendingOrder: { orderId: string; orderCode?: string; planId: SubscriptionPlanId; amount: number; paymentMethod: string; createdAt: string; paymentUrl: string | null; provider?: string; paymentReference?: string | null } | null
   lastPaymentStatus: string | null
   lastReviewNote?: string | null
   accountId?: string | null
@@ -70,7 +70,7 @@ export type PaymentOrderStatus = {
 
 export type SubscriptionHistory = {
   history: Array<{ id: string; event: string; planId: SubscriptionPlanId; status: string; startedAt: string | null; endsAt: string | null; amount: number; currency: string; paymentMethod: string | null; orderId: string | null; transactionId: string | null; createdAt: string }>
-  orders: Array<{ orderId: string; planId: SubscriptionPlanId; amount: number; currency: string; paymentMethod: string; status: string; activated: boolean; transactionId: string | null; createdAt: string; updatedAt: string }>
+  orders: Array<{ orderId: string; orderCode?: string; provider?: string; reviewNote?: string | null; planId: SubscriptionPlanId; amount: number; currency: string; paymentMethod: string; status: string; activated: boolean; transactionId: string | null; createdAt: string; updatedAt: string }>
 }
 
 export type ApiReview = {
@@ -127,7 +127,9 @@ export async function createPaymentOrder(params: CreateOrderParams): Promise<Cre
   return parseJsonResponse<CreateOrderResponse>(response)
 }
 
-export type ManualTransferConfig = { enabled: boolean; bankName?: string; recipient?: string; account?: string; instructions?: string }
+/** One way to pay that the administrator checks by hand (MBank / Элсом / O!Деньги / bank transfer). */
+export type ManualPaymentMethod = { id: string; account: string; recipient?: string; instructions?: string; bankName?: string }
+export type ManualTransferConfig = { enabled: boolean; methods?: ManualPaymentMethod[]; bankName?: string; recipient?: string; account?: string; instructions?: string }
 
 export async function getManualTransferConfig(): Promise<ManualTransferConfig> {
   const response = await fetchWithWakeRetry(`${API_BASE_URL}/api/payments/manual/config`)
@@ -143,7 +145,7 @@ export async function getDemoPaymentConfig(): Promise<{ enabled: boolean }> {
  * Demo Payment: card number, expiry and CVV are validated in the browser and never sent.
  * `checkoutKey` is generated once per opened payment window so a retry cannot activate twice.
  */
-export async function submitDemoPayment(params: { planId: SubscriptionPlanId; cardholderName: string; checkoutKey: string }): Promise<{ orderId: string; transactionId: string; status: 'paid'; planId: SubscriptionPlanId; endsAt: string | null; accessPlan: SubscriptionPlanId; alreadyProcessed?: boolean }> {
+export async function submitDemoPayment(params: { planId: SubscriptionPlanId; cardholderName: string; checkoutKey: string; language?: string }): Promise<{ orderId: string; orderCode?: string; transactionId: string; status: 'paid'; planId: SubscriptionPlanId; endsAt: string | null; accessPlan: SubscriptionPlanId; alreadyProcessed?: boolean }> {
   const response = await fetch(`${API_BASE_URL}/api/payments/demo`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -159,9 +161,11 @@ export type ManualTransferParams = {
   payerName: string
   paymentReference: string
   receiptNote?: string
+  paymentMethod?: string
+  language?: string
 }
 
-export async function submitManualTransfer(params: ManualTransferParams): Promise<{ orderId: string; status: 'pending'; paymentReference: string }> {
+export async function submitManualTransfer(params: ManualTransferParams): Promise<{ orderId: string; orderCode?: string; status: 'pending'; paymentReference: string; paymentMethod?: string }> {
   const response = await fetch(`${API_BASE_URL}/api/payments/manual`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -229,6 +233,15 @@ export async function getSubscriptionHistory(userEmail: string): Promise<Subscri
     headers: withAuthHeaders()
   })
   return parseJsonResponse<SubscriptionHistory>(response)
+}
+
+export type Certificate = { id: string; courseId: string; courseTitle: LangText; holderName: string; issuedAt: string }
+export type CertificatesResponse = { canEarn: boolean; plan: SubscriptionPlanId; completedCourses: number; lockedCourses: number; certificates: Certificate[] }
+
+/** The signed-in user's certificates (the server issues them for completed courses on PRO / AI PRO). */
+export async function getCertificates(): Promise<CertificatesResponse> {
+  const response = await fetchWithWakeRetry(`${API_BASE_URL}/api/certificates`, { headers: withAuthHeaders() })
+  return parseJsonResponse<CertificatesResponse>(response)
 }
 
 export async function getReviewsFromServer(): Promise<ApiReview[]> {

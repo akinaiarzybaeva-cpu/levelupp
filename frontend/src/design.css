@@ -2618,3 +2618,121 @@ div.ai-key-head { cursor: default; }
 .tok-selector { color: #c4a7ff; }
 .tok-cmd { color: #7cf0b5; font-weight: 600; }
 .tok-flag { color: #ffd27a; }
+
+/* ───────────────────────── Plans: purchase system ───────────────────────── */
+/* Equal-height cards: the feature list takes the free space, the button sits at the bottom. */
+.pricing-grid > .pricing-card { height: 100%; }
+.pricing-card ul { flex: 1 1 auto; align-content: start; }
+.pricing-card .price { font-size: clamp(2.2rem, 3.4vw, 2.7rem); letter-spacing: -0.02em; }
+.pricing-card { transition: transform 0.28s var(--lu-ease), box-shadow 0.28s var(--lu-ease), border-color 0.28s var(--lu-ease); }
+
+/* PRO — green accent */
+.pricing-card.plan-pro::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 5px;
+  border-radius: inherit;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  background: linear-gradient(90deg, #0b7f4a, #1fbf6e, #3ee08f);
+}
+
+/* AI PRO — premium gradient card */
+.pricing-card.plan-aipro,
+:root[data-theme='dark'] .pricing-card.plan-aipro {
+  background:
+    radial-gradient(120% 80% at 100% 0%, rgba(124, 92, 255, 0.35), transparent 60%),
+    radial-gradient(120% 90% at 0% 100%, rgba(31, 191, 110, 0.32), transparent 55%),
+    linear-gradient(160deg, #0b1f33 0%, #0a2a24 55%, #06281d 100%);
+  border: 1.5px solid transparent;
+  background-clip: padding-box;
+  box-shadow: 0 24px 60px rgba(76, 60, 200, 0.22), 0 0 0 1.5px rgba(140, 120, 255, 0.45);
+}
+.pricing-card.plan-aipro:hover { transform: translateY(-6px); box-shadow: 0 30px 70px rgba(76, 60, 200, 0.3), 0 0 0 1.5px rgba(160, 140, 255, 0.6); }
+.pricing-card.plan-aipro .plan-icon { background: linear-gradient(135deg, rgba(124, 92, 255, 0.35), rgba(62, 224, 143, 0.3)); color: #fff; }
+.popular-badge.premium {
+  background: linear-gradient(90deg, #7c5cff, #1fbf6e);
+  color: #fff;
+  letter-spacing: 0.04em;
+  box-shadow: 0 10px 24px rgba(124, 92, 255, 0.35);
+}
+.pricing-card.is-current.plan-aipro { box-shadow: 0 24px 60px rgba(76, 60, 200, 0.22), 0 0 0 2px var(--lu-green); }
+
+/* Purchase window */
+.purchase-modal { max-height: min(92vh, 860px); overflow-y: auto; }
+.purchase-label { margin: 0 0 8px; font-weight: 700; font-size: 0.88rem; }
+.purchase-demo-banner {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 12px 14px; border-radius: 14px;
+  background: rgba(124, 92, 255, 0.1); border: 1px dashed rgba(124, 92, 255, 0.55);
+  color: var(--lu-ink); font-size: 0.88rem; line-height: 1.5;
+}
+.purchase-demo-banner svg { flex: 0 0 auto; color: #7c5cff; margin-top: 2px; }
+.purchase-demo-banner strong { color: #7c5cff; }
+.purchase-demo-note { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #7c5cff !important; }
+.purchase-order-id { font-size: 0.9rem; color: var(--lu-ink-muted) !important; }
+.purchase-order-id code { font-weight: 800; color: var(--heading); letter-spacing: 0.04em; }
+.purchase-status-pill { display: inline-block; padding: 2px 10px; border-radius: 999px; background: #fff4e5; color: #8a4b00; font-weight: 700; font-size: 0.8rem; }
+.purchase-success-burst { position: relative; display: grid; place-items: center; width: 92px; height: 92px; border-radius: 50%; color: var(--primary); background: var(--primary-soft); animation: pay-check 0.55s var(--lu-ease); }
+.purchase-success-burst::before,
+.purchase-success-burst::after { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--primary); opacity: 0; animation: purchase-ring 1.6s ease-out 0.2s 2; }
+.purchase-success-burst::after { animation-delay: 0.55s; }
+@keyframes purchase-ring { 0% { transform: scale(0.8); opacity: 0.7; } 100% { transform: scale(1.7); opacity: 0; } }
+.purchase-pending-icon { color: #d98a00; animation: purchase-tick 2.4s ease-in-out infinite; }
+@keyframes purchase-tick { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(-12deg); } }
+.purchase-failed-icon { color: #dc2626; animation: pay-check 0.45s var(--lu-ease); }
+.spin { animation: pay-spin 0.9s linear infinite; }
+
+/* Dashboard: My plan */
+.subscription-panel.plan-pro { border-top: 4px solid var(--lu-emerald); }
+.subscription-panel.plan-aipro { border-top: 4px solid #7c5cff; }
+.subscription-price { font-size: 1.15rem; font-weight: 800; color: var(--heading); }
+.subscription-price small { font-weight: 600; color: var(--lu-ink-muted); font-size: 0.82rem; }
+.plan-expiry-warning {
+  display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
+  padding: 12px 14px; border-radius: 14px;
+  background: #fff4e5; color: #8a4b00; border: 1px solid #f5c98a; font-weight: 600; font-size: 0.92rem;
+}
+.plan-expiry-warning svg { flex: 0 0 auto; }
+:root[data-theme='dark'] .plan-expiry-warning { background: rgba(245, 158, 11, 0.14); color: #fcd38a; border-color: rgba(245, 158, 11, 0.4); }
+:root[data-theme='dark'] .purchase-status-pill { background: rgba(245, 158, 11, 0.18); color: #fcd38a; }
+.order-status { font-weight: 700; }
+.order-status-paid { color: var(--primary-strong); }
+.order-status-pending { color: #d98a00; }
+.order-status-failed, .order-status-cancelled { color: #dc2626; }
+
+/* Certificates */
+.certificates-panel { margin-top: 22px; }
+.certificate-locked { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--lu-ink-soft); }
+.certificate-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.certificate-list li { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px; border: 1px solid var(--lu-line); background: var(--lu-surface); }
+.certificate-list li > div { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.certificate-list small { color: var(--lu-ink-muted); overflow-wrap: anywhere; }
+.certificate-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--primary-soft); color: var(--primary-strong); flex: 0 0 auto; }
+.certificate-sheet {
+  display: grid; justify-items: center; gap: 6px; text-align: center;
+  padding: 28px 20px; border-radius: 16px;
+  border: 3px double #0b7f4a; background: linear-gradient(180deg, #ffffff, #effaf4); color: #06281d;
+}
+.certificate-sheet h2 { margin: 4px 0; letter-spacing: 0.2em; font-size: 1.6rem; color: #06281d; }
+.certificate-sheet p { margin: 0; color: #4b5b6b; }
+.certificate-brand { font-weight: 800; letter-spacing: 0.3em; color: #0b7f4a; font-size: 0.85rem; }
+.certificate-holder { font-size: 1.5rem; color: #06281d; }
+.certificate-course { font-size: 1.15rem; color: #0b7f4a; }
+.certificate-meta { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 18px; margin-top: 10px; font-size: 0.82rem; color: #6b7a88; }
+@media print {
+  body * { visibility: hidden !important; }
+  .certificate-sheet, .certificate-sheet * { visibility: visible !important; }
+  .certificate-sheet { position: fixed; inset: 0; margin: auto; width: 90%; height: fit-content; padding: 60px 40px; }
+}
+
+@media (max-width: 560px) {
+  .purchase-modal .payment-methods { grid-template-columns: 1fr; }
+  .purchase-modal .pay-fields { grid-template-columns: 1fr; }
+  .certificate-list li { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .purchase-success-burst, .purchase-success-burst::before, .purchase-success-burst::after,
+  .purchase-pending-icon, .purchase-failed-icon { animation: none; }
+}

@@ -140,33 +140,43 @@ export function formatRegistrationMessage(info) {
   ].join('\n')
 }
 
-/** Paid / demo purchase by a user. Never contains card number, CVV, expiry or other payment secrets. */
-export function formatUserPurchaseMessage(info) {
-  return [
-    '🟢 <b>НОВАЯ ПОКУПКА</b>',
-    '',
-    `👤 Имя: ${esc(info.name)}`,
+const money = (amount, currency) => `${amount} ${currency === 'KGS' ? 'сом' : currency}`
+/** Short, human-friendly form of an order id (the full UUID stays in the database). */
+export const orderCode = (orderId) => (orderId ? `LU-${String(orderId).replace(/-/g, '').slice(0, 8).toUpperCase()}` : '—')
+
+/** The common body of every purchase message (the layout requested for the admin chat). */
+function purchaseLines(info, statusText) {
+  const lines = [
+    `👤 Колдонуучу: ${esc(info.name)}`,
     `📧 Email: ${esc(info.email)}`,
-    `📦 Тариф: ${esc(PLAN_LABEL[info.planId] ?? info.planId)}`,
-    `💰 Стоимость: ${esc(info.amount)} ${esc(info.currency === 'KGS' ? 'сом' : info.currency)}`,
-    `📅 Дата: ${esc(bishkekTime(info.purchasedAt))}`,
-    '✅ Статус: Активирован'
-  ].join('\n')
+    `💎 Тариф: ${esc(PLAN_LABEL[info.planId] ?? info.planId)}`,
+    `💰 Баасы: ${esc(money(info.amount, info.currency))}`,
+    `📅 Сатып алган күнү: ${esc(bishkekTime(info.purchasedAt ?? info.createdAt))}`,
+    `📅 Мөөнөтү: ${esc(info.durationDays ?? 30)} күн${info.endsAt ? ` (${esc(bishkekTime(info.endsAt))} чейин)` : ''}`,
+    `💳 Төлөм ыкмасы: ${esc(info.paymentMethod)}`
+  ]
+  if (info.orderId) lines.push(`🆔 Order ID: <code>${esc(orderCode(info.orderId))}</code>`)
+  if (info.reference) lines.push(`🧾 Транзакция №: <code>${esc(info.reference)}</code>`)
+  lines.push(`📌 Статусу: ${statusText}`)
+  return lines
 }
 
-/** Bank-transfer purchase request waiting for the administrator (not a confirmed payment). */
+/** Payment confirmed (provider webhook, approved transfer) or a DEMO checkout. Never contains card data. */
+export function formatUserPurchaseMessage(info) {
+  if (info.template === 'demo') {
+    return ['🎉 <b>ЖАҢЫ ТАРИФ САТЫП АЛУУ! (DEMO)</b>', '', ...purchaseLines(info, '🧪 DEMO — акча алынган жок, тариф тест үчүн активдештирилди')].join('\n')
+  }
+  return ['✅ <b>ТӨЛӨМ ЫРАСТАЛДЫ!</b>', '', ...purchaseLines(info, 'Ырасталды — тариф активдүү')].join('\n')
+}
+
+/** New purchase request waiting for the administrator (not a confirmed payment). */
 export function formatRequestMessage(info) {
-  return [
-    '📝 <b>НОВАЯ ЗАЯВКА</b>',
-    '',
-    `👤 Имя: ${esc(info.name)}`,
-    `📧 Email: ${esc(info.email)}`,
-    `📦 Тариф: ${esc(PLAN_LABEL[info.planId] ?? info.planId)}`,
-    `💰 Сумма: ${esc(info.amount)} ${esc(info.currency === 'KGS' ? 'сом' : info.currency)}`,
-    `🧾 Номер платежа: ${esc(info.reference)}`,
-    `📅 Дата: ${esc(bishkekTime(info.createdAt))}`,
-    '⏳ Статус: Ожидает проверки (Admin → Purchase requests)'
-  ].join('\n')
+  return ['🎉 <b>ЖАҢЫ ТАРИФ САТЫП АЛУУ!</b>', '', ...purchaseLines(info, '⏳ Төлөм күтүлүүдө (Админ → Purchase requests)')].join('\n')
+}
+
+/** The administrator rejected a purchase request. */
+export function formatRejectedMessage(info) {
+  return ['❌ <b>ТӨЛӨМ ЧЕТКЕ КАГЫЛДЫ</b>', '', ...purchaseLines(info, `Четке кагылды${info.note ? ` — ${esc(info.note)}` : ''}`)].join('\n')
 }
 
 export function formatReviewMessage(info) {
@@ -218,6 +228,11 @@ export function notifyRegistration(db, info) {
 /** New bank-transfer request: once per order. */
 export function notifyPurchaseRequest(db, info) {
   return notifyEvent(db, { key: `request:${info.orderId}`, kind: 'request', text: formatRequestMessage(info), logLabel: info.orderId })
+}
+
+/** Rejected purchase request: once per order. */
+export function notifyPurchaseRejected(db, info) {
+  return notifyEvent(db, { key: `rejected:${info.orderId}`, kind: 'request', text: formatRejectedMessage(info), logLabel: info.orderId })
 }
 
 /** New review (edits of an existing review do not notify again): once per review id. */

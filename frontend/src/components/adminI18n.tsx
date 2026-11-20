@@ -274,6 +274,13 @@ const DICT: Record<string, Entry> = {
   'No subscriptions found': ['Жазылуулар табылган жок', 'Подписки не найдены'],
   'Grant': ['Берүү', 'Выдать'],
   'Revoke': ['Токтотуу', 'Отозвать'],
+  'Extend': ['Узартуу', 'Продлить'],
+  'Stop plan': ['Тарифти токтотуу', 'Остановить тариф'],
+  'Subscription extended': ['Тарифтин мөөнөтү узартылды', 'Срок тарифа продлён'],
+  'Extend the plan of {0} by how many days? (1–366)': ['{0} тарифин канча күнгө узартуу керек? (1–366)', 'На сколько дней продлить тариф {0}? (1–366)'],
+  'Days must be a whole number between 1 and 366': ['Күндөр 1ден 366га чейинки бүтүн сан болушу керек', 'Количество дней — целое число от 1 до 366'],
+  'Stop the plan of {0} now? Access ends immediately.': ['{0} тарифин азыр токтотосузбу? Жеткиликтүүлүк дароо жабылат.', 'Остановить тариф {0} сейчас? Доступ закроется сразу.'],
+  'Manual payments are turned off for users. Set PAYMENT_MBANK_ACCOUNT, PAYMENT_ELSOM_ACCOUNT and/or PAYMENT_ODENGI_ACCOUNT (or MANUAL_TRANSFER_ENABLED=true with MANUAL_TRANSFER_ACCOUNT) on the backend to enable them.': ['Кол менен текшерилүүчү төлөмдөр өчүрүлгөн. Күйгүзүү үчүн backend\'де PAYMENT_MBANK_ACCOUNT, PAYMENT_ELSOM_ACCOUNT жана/же PAYMENT_ODENGI_ACCOUNT коюңуз (же MANUAL_TRANSFER_ENABLED=true жана MANUAL_TRANSFER_ACCOUNT).', 'Ручные платежи для пользователей выключены. Чтобы включить, задайте на backend PAYMENT_MBANK_ACCOUNT, PAYMENT_ELSOM_ACCOUNT и/или PAYMENT_ODENGI_ACCOUNT (или MANUAL_TRANSFER_ENABLED=true и MANUAL_TRANSFER_ACCOUNT).'],
 
   // ── Payments ──
   'Failed to load payments': ['Төлөмдөр жүктөлгөн жок', 'Не удалось загрузить платежи'],

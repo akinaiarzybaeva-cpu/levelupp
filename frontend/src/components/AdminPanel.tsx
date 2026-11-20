@@ -1112,14 +1112,15 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
 
   useEffect(() => { void loadSubs() }, [loadSubs])
 
-  const updateSub = async (userEmail: string, action: 'activate' | 'revoke', planId?: string) => {
+  const updateSub = async (userEmail: string, action: 'activate' | 'revoke' | 'extend', planId?: string, days?: number) => {
+    if (action === 'revoke' && !window.confirm(t('Stop the plan of {0} now? Access ends immediately.', [userEmail]))) return
     try {
       await adminFetch(`/api/admin/subscriptions/${encodeURIComponent(userEmail)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, planId })
+        body: JSON.stringify({ action, planId, days })
       })
-      onToast((action === 'activate' ? t('Subscription activated successfully') : t('Subscription revoked successfully')), 'success')
+      onToast((action === 'activate' ? t('Subscription activated successfully') : action === 'extend' ? t('Subscription extended') : t('Subscription revoked successfully')), 'success')
       void loadSubs()
     } catch (err) {
       onToast(err instanceof Error ? err.message : t("Operation failed"), 'error')
@@ -1225,10 +1226,21 @@ function SubscriptionsSection({ onToast }: { onToast: (msg: string, kind: ToastK
                         <button type="button" className="btn btn-secondary small" onClick={() => setGrantTarget(row.userEmail)}>
                           {t("Grant")}
                         </button>
+                        {row.planId !== 'free' && row.status !== 'expired' && (
+                          <button type="button" className="btn btn-secondary small" onClick={() => {
+                            const answer = window.prompt(t('Extend the plan of {0} by how many days? (1–366)', [row.userEmail]), '30')
+                            if (answer === null) return
+                            const days = Number(answer)
+                            if (!Number.isInteger(days) || days < 1 || days > 366) { onToast(t('Days must be a whole number between 1 and 366'), 'error'); return }
+                            void updateSub(row.userEmail, 'extend', undefined, days)
+                          }}>{t("Extend")}</button>
+                        )}
                         <button type="button" className="btn btn-secondary small" onClick={() => setHistoryFor(row.userEmail)}>{t("History")}</button>
-                        <button type="button" className="btn btn-warning small" onClick={() => void updateSub(row.userEmail, 'revoke')}>
-                          {t("Revoke")}
-                        </button>
+                        {row.planId !== 'free' && row.status !== 'expired' && (
+                          <button type="button" className="btn btn-warning small" onClick={() => void updateSub(row.userEmail, 'revoke')}>
+                            {t("Stop plan")}
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1895,6 +1907,7 @@ function SubscriptionHistoryModal({ userEmail, onClose }: { userEmail: string; o
 
 type PurchaseRequest = {
   id: string
+  orderCode?: string
   userEmail: string
   fullName: string | null
   accountId: string | null
@@ -1973,7 +1986,7 @@ function PurchaseRequestsSection({ onToast }: { onToast: (msg: string, kind: Toa
         </button>
       </div>
       {!manualEnabled && (
-        <p className="admin-hint">{t("Bank transfer is turned off for users. Set MANUAL_TRANSFER_ENABLED=true and MANUAL_TRANSFER_ACCOUNT on the backend to enable it.")}</p>
+        <p className="admin-hint">{t("Manual payments are turned off for users. Set PAYMENT_MBANK_ACCOUNT, PAYMENT_ELSOM_ACCOUNT and/or PAYMENT_ODENGI_ACCOUNT (or MANUAL_TRANSFER_ENABLED=true with MANUAL_TRANSFER_ACCOUNT) on the backend to enable them.")}</p>
       )}
       <div className="admin-card">
         <div className="admin-card-header">
@@ -1999,6 +2012,7 @@ function PurchaseRequestsSection({ onToast }: { onToast: (msg: string, kind: Toa
                   <th>{t("Customer")}</th>
                   <th>{t("Plan")}</th>
                   <th>{t("Amount")}</th>
+                  <th>{t("Method")}</th>
                   <th>{t("Payer / Transaction ID")}</th>
                   <th>{t("Status")}</th>
                   <th>{t("Date")}</th>
@@ -2011,6 +2025,7 @@ function PurchaseRequestsSection({ onToast }: { onToast: (msg: string, kind: Toa
                     <td><strong>{row.fullName ?? '—'}</strong><br /><small>{row.userEmail}{row.accountId ? ` · ${row.accountId}` : ''}</small></td>
                     <td>{row.planId.toUpperCase()}</td>
                     <td>{formatMoney(row.amount, row.currency)}</td>
+                    <td>{row.paymentMethod}{row.orderCode && <><br /><span className="admin-mono">{row.orderCode}</span></>}</td>
                     <td>{row.payerName ?? '—'}<br /><span className="admin-mono">{row.transactionId ?? '—'}</span>{row.receiptNote && <><br /><small>{row.receiptNote}</small></>}</td>
                     <td>
                       <span className={pillClass(row.status)}>{row.status === 'failed' ? 'rejected' : row.status}</span>

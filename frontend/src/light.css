@@ -473,3 +473,16 @@
 :root:not([data-theme='dark']) .ai-chat-history-item-main span,
 :root:not([data-theme='dark']) .ai-chat-history-item-main svg { color: var(--lu-ink-muted); }
 :root:not([data-theme='dark']) .ai-chat-history-remove { border-color: var(--lu-line); color: var(--lu-ink-muted); background: transparent; }
+
+/* Plans: AI PRO premium gradient in the light palette */
+:root:not([data-theme='dark']) .pricing-card.plan-aipro {
+  background:
+    radial-gradient(120% 80% at 100% 0%, rgba(124, 92, 255, 0.16), transparent 60%),
+    radial-gradient(120% 90% at 0% 100%, rgba(31, 191, 110, 0.16), transparent 55%),
+    linear-gradient(160deg, #ffffff 0%, #f4f1ff 50%, #ecfaf2 100%);
+  border: 1.5px solid transparent;
+  box-shadow: 0 22px 50px rgba(124, 92, 255, 0.16), 0 0 0 1.5px rgba(124, 92, 255, 0.45);
+}
+:root:not([data-theme='dark']) .pricing-card.plan-aipro .plan-icon { background: linear-gradient(135deg, #7c5cff, #1fbf6e); color: #ffffff; }
+:root:not([data-theme='dark']) .pricing-card.plan-aipro .plan-tag { background: rgba(124, 92, 255, 0.12); color: #5a3fe0; }
+:root:not([data-theme='dark']) .popular-badge.premium { background: linear-gradient(90deg, #7c5cff, #1fbf6e); color: #ffffff; }

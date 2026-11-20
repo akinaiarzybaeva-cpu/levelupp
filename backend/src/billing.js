@@ -96,6 +96,12 @@ export function initBilling(db) {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_subscription_history_user ON subscription_history (user_email, created_at);
+    -- One row per reminder already sent (e.g. "plan ends in 3 days" for one period), so it is never repeated.
+    CREATE TABLE IF NOT EXISTS billing_notices (
+      notice_key TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `)
 
   const columns = new Set(db.prepare('PRAGMA table_info(user_subscriptions)').all().map((c) => c.name))
@@ -105,7 +111,8 @@ export function initBilling(db) {
   const orderColumns = new Set(db.prepare('PRAGMA table_info(payment_orders)').all().map((c) => c.name))
   for (const [name, type] of [
     ['customer_name', 'TEXT'], ['customer_email', 'TEXT'], ['payer_name', 'TEXT'], ['payment_reference', 'TEXT'],
-    ['receipt_note', 'TEXT'], ['reviewed_at', 'TEXT'], ['reviewed_by', 'TEXT'], ['review_note', 'TEXT']
+    ['receipt_note', 'TEXT'], ['reviewed_at', 'TEXT'], ['reviewed_by', 'TEXT'], ['review_note', 'TEXT'],
+    ['customer_language', 'TEXT']
   ]) {
     if (!orderColumns.has(name)) db.exec(`ALTER TABLE payment_orders ADD COLUMN ${name} ${type}`)
   }
@@ -347,6 +354,29 @@ export function cancelSubscription(db, userEmail) {
   return { subscription: db.prepare('SELECT * FROM user_subscriptions WHERE user_email = ?').get(userEmail) }
 }
 
+/** Admin adds `days` to the current paid period (the plan stays the same). */
+export function extendSubscription(db, userEmail, days, adminEmail) {
+  const count = Number(days)
+  if (!Number.isInteger(count) || count < 1 || count > 366) return { error: 'Days must be a whole number between 1 and 366', status: 400 }
+  const row = getSubscriptionRow(db, userEmail)
+  if (!rowGivesAccess(row)) return { error: 'The user has no active paid plan to extend. Use "Grant" to give a plan.', status: 400, code: 'NO_ACTIVE_PLAN' }
+  const nowIso = new Date().toISOString()
+  const endsAt = new Date(new Date(row.ends_at).getTime() + count * DAY_MS).toISOString()
+  db.prepare("UPDATE user_subscriptions SET ends_at = ?, status = 'active', cancelled_at = NULL, updated_at = ? WHERE user_email = ?").run(endsAt, nowIso, userEmail)
+  recordHistory(db, { user_email: userEmail, event: 'admin_extend', plan_id: row.plan_id, status: 'active', started_at: row.started_at, ends_at: endsAt, payment_method: 'admin', transaction_id: adminEmail ? `admin:${adminEmail}` : null })
+  return { subscription: db.prepare('SELECT * FROM user_subscriptions WHERE user_email = ?').get(userEmail) }
+}
+
+/** Paid plans that end within `withinDays` and were not reminded yet for this period. Marks them as reminded. */
+export function claimEndingSoonReminders(db, withinDays = 3) {
+  const nowMs = Date.now()
+  const rows = db.prepare("SELECT * FROM user_subscriptions WHERE plan_id != 'free' AND status IN ('active', 'cancelled') AND datetime(ends_at) > datetime(?) AND datetime(ends_at) <= datetime(?)")
+    .all(new Date(nowMs).toISOString(), new Date(nowMs + withinDays * DAY_MS).toISOString())
+  const claim = db.prepare('INSERT OR IGNORE INTO billing_notices (notice_key, user_email, created_at) VALUES (?, ?, ?)')
+  return rows.filter((row) => claim.run(`ending:${row.user_email}:${row.ends_at}`, row.user_email, new Date().toISOString()).changes === 1)
+    .map((row) => ({ ...row, daysLeft: Math.max(1, Math.ceil((new Date(row.ends_at).getTime() - nowMs) / DAY_MS)) }))
+}
+
 /** Admin revokes access immediately. */
 export function revokeSubscription(db, userEmail) {
   const row = db.prepare('SELECT * FROM user_subscriptions WHERE user_email = ?').get(userEmail)
@@ -382,7 +412,7 @@ export function formatSubscriptionForUser(db, userEmail) {
     accessPlan,
     hasAccess: accessPlan !== 'free',
     remainingDays: accessPlan !== 'free' ? Math.max(0, Math.ceil((new Date(row.ends_at).getTime() - Date.now()) / DAY_MS)) : 0,
-    pendingOrder: pending ? { orderId: pending.id, planId: pending.plan_id, amount: pending.amount, paymentMethod: pending.payment_method, createdAt: pending.created_at, paymentUrl: pending.payment_url, provider: pending.provider, paymentReference: pending.payment_reference ?? null } : null,
+    pendingOrder: pending ? { orderId: pending.id, orderCode: `LU-${String(pending.id).replace(/-/g, '').slice(0, 8).toUpperCase()}`, planId: pending.plan_id, amount: pending.amount, paymentMethod: pending.payment_method, createdAt: pending.created_at, paymentUrl: pending.payment_url, provider: pending.provider, paymentReference: pending.payment_reference ?? null } : null,
     lastReviewNote: lastOrder && lastOrder.provider === 'manual' && lastOrder.status === 'failed' ? (lastOrder.review_note ?? null) : null,
     lastPaymentStatus: lastOrder ? lastOrder.status : null
   }

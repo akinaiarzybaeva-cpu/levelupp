@@ -1,39 +1,31 @@
 import { useState } from 'react'
-import { BookOpen, Sparkles, X, ArrowRight, Bot, Star, CheckCircle2, Rocket, RefreshCw } from 'lucide-react'
+import { BookOpen, Sparkles, X, ArrowRight, Bot, Star, CheckCircle2, Rocket, Crown } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { type SubscriptionPlanId } from '../subscriptionService'
-import PaymentModal, { useDemoPaymentEnabled } from './PaymentModal'
+import PurchaseModal from './PurchaseModal'
 import { translations, useLanguage, pick, PLAN_RANK, FREE_LESSON_LIMIT, useBilling, accessPlanOf, planPeriodLabel, formatDateTime, type Lang, type PlanView } from '../appShared'
 
 /**
  * One pricing plan card (home page and pricing page). The button depends on who is looking:
- * guest → register / choose; current plan → renew; higher plan → upgrade; lower plan → included.
+ * guest → register / sign in; current plan → "Plan active" (no second purchase of the same plan);
+ * higher plan → buy / upgrade; lower plan → included.
  */
 export default function PricingCard({ plan, t, language }: { plan: PlanView; t: (typeof translations)[Lang]; language: Lang }) {
-  const { subscription, isLoggedIn, refreshSubscription } = useBilling()
+  const { subscription, isLoggedIn } = useBilling()
   const Icon = planIcons[plan.id] ?? Sparkles
   const current = isLoggedIn ? accessPlanOf(subscription) : null
   const isCurrent = current === plan.id
+  // Guests go through sign-in first (ProtectedRoute on the checkout page); signed-in users get the window.
   const checkoutPath = `/pricing/checkout/${plan.id}`
-  const demoEnabled = useDemoPaymentEnabled()
   const [payOpen, setPayOpen] = useState(false)
-  // Logged-in users pay in the Demo Payment window; guests go through login first (ProtectedRoute).
-  const useModal = isLoggedIn && demoEnabled === true && plan.id !== 'free'
   const openPayment = (event: React.MouseEvent) => {
-    if (!useModal) return
+    if (!isLoggedIn || plan.id === 'free') return
     event.preventDefault()
     setPayOpen(true)
   }
-  const paymentModal = useModal && (plan.id === 'pro' || plan.id === 'aipro') ? (
-    <PaymentModal
-      open={payOpen}
-      onClose={() => setPayOpen(false)}
-      plan={{ id: plan.id, name: plan.name, title: plan.label[language], price: plan.price, currency: plan.currency, durationDays: plan.durationDays }}
-      language={language}
-      onPaid={async () => { const fresh = await refreshSubscription(); return fresh ? accessPlanOf(fresh) : null }}
-      endsAtText={(iso) => formatDateTime(iso, language)}
-    />
-  ) : null
+  const paymentModal = isLoggedIn && plan.id !== 'free'
+    ? <PurchaseModal open={payOpen} onClose={() => setPayOpen(false)} plan={plan} language={language} />
+    : null
 
   let action: React.ReactNode
   if (plan.id === 'free') {
@@ -41,19 +33,15 @@ export default function PricingCard({ plan, t, language }: { plan: PlanView; t: 
       ? <Link to="/auth?mode=register" className="btn btn-secondary full-width">{t.buttons.startFree} <ArrowRight size={16} /></Link>
       : <span className="btn btn-secondary full-width is-static" aria-disabled="true"><CheckCircle2 size={16} /> {isCurrent ? pick(language, 'Учурдагы тариф', 'Ваш текущий тариф', 'Your current plan') : pick(language, 'Тарифиңизге кирет', 'Входит в ваш тариф', 'Included in your plan')}</span>
   } else if (isCurrent) {
-    action = (
-      <>
-        <span className="btn btn-primary full-width is-static plan-active-btn" aria-disabled="true"><CheckCircle2 size={16} /> {pick(language, 'Тариф активдүү', 'Тариф активен', 'Plan active')}</span>
-        <Link to={checkoutPath} className="text-link plan-renew-link" onClick={openPayment}><RefreshCw size={14} /> {pick(language, 'Узартуу', 'Продлить', 'Renew')}</Link>
-      </>
-    )
+    // The active plan is never offered for purchase again here; renewal lives in "My plan" on the dashboard.
+    action = <span className="btn btn-primary full-width is-static plan-active-btn" aria-disabled="true"><CheckCircle2 size={16} /> {pick(language, 'Тариф активдүү', 'Тариф активен', 'Plan active')}</span>
   } else if (current && PLAN_RANK[plan.id] < PLAN_RANK[current]) {
     action = <span className="btn btn-secondary full-width is-static" aria-disabled="true"><CheckCircle2 size={16} /> {pick(language, 'Тарифиңизге кирет', 'Входит в ваш тариф', 'Included in your plan')}</span>
   } else {
     const upgrading = current !== null && current !== 'free'
     const label = upgrading
       ? pick(language, `${plan.name} тарифине өтүү`, `Перейти на ${plan.name}`, `Upgrade to ${plan.name}`)
-      : pick(language, 'Тарифти сатып алуу', 'Купить тариф', 'Buy plan')
+      : pick(language, 'Сатып алуу', 'Купить', 'Buy')
     action = <Link to={checkoutPath} onClick={openPayment} className={plan.featured || plan.id === 'aipro' ? 'btn btn-primary full-width' : 'btn btn-secondary full-width'}>{label} <ArrowRight size={16} /></Link>
   }
 
@@ -61,7 +49,9 @@ export default function PricingCard({ plan, t, language }: { plan: PlanView; t: 
     <div className={['pricing-card', plan.featured ? 'featured' : '', `plan-${plan.id}`, isCurrent ? 'is-current' : ''].filter(Boolean).join(' ')}>
       {isCurrent
         ? <span className="popular-badge current"><CheckCircle2 size={13} /> {pick(language, 'Сиздин тариф', 'Ваш тариф', 'Your plan')}</span>
-        : plan.featured && <span className="popular-badge"><Star size={13} fill="currentColor" /> {pick(language, 'Популярдуу', 'Популярный', 'Popular')}</span>}
+        : plan.id === 'aipro'
+          ? <span className="popular-badge premium"><Crown size={13} /> {pick(language, 'ЭҢ КӨП МҮМКҮНЧҮЛҮК', 'МАКСИМУМ ВОЗМОЖНОСТЕЙ', 'MOST FEATURES')}</span>
+          : plan.featured && <span className="popular-badge"><Star size={13} fill="currentColor" /> {pick(language, 'Популярдуу', 'Популярный', 'Popular')}</span>}
       <span className="plan-icon"><Icon size={22} /></span>
       <span className="plan-tag">{plan.name}</span>
       <h3>{plan.label[language]}</h3>
@@ -89,9 +79,13 @@ export function PlanComparison({ plans }: { plans: PlanView[] }) {
   const ids = plans.map((plan) => plan.id)
   const rows: Array<{ label: string; values: Record<SubscriptionPlanId, React.ReactNode> }> = [
     { label: pick(language, 'Ар бир курстагы сабактар', 'Уроки в каждом курсе', 'Lessons in every course'), values: { free: pick(language, `Алгачкы ${FREE_LESSON_LIMIT}`, `Первые ${FREE_LESSON_LIMIT}`, `First ${FREE_LESSON_LIMIT}`), pro: pick(language, 'Баары', 'Все', 'All'), aipro: pick(language, 'Баары', 'Все', 'All') } },
+    { label: pick(language, 'Бардык 6 курс менен таанышуу', 'Знакомство со всеми 6 курсами', 'Explore all 6 courses'), values: { free: yes, pro: yes, aipro: yes } },
     { label: pick(language, 'Окуу прогресси', 'Прогресс обучения', 'Learning progress'), values: { free: yes, pro: yes, aipro: yes } },
-    { label: pick(language, 'Курсту толук бүтүрүү', 'Полное прохождение курса', 'Complete full courses'), values: { free: no, pro: yes, aipro: yes } },
-    { label: pick(language, 'AI жардамчы', 'AI-ассистент', 'AI assistant'), values: { free: no, pro: no, aipro: yes } },
+    { label: pick(language, 'Бардык видеосабактар', 'Все видеоуроки', 'All video lessons'), values: { free: no, pro: yes, aipro: yes } },
+    { label: pick(language, 'Сабактарга каалаган убакта кайра кирүү', 'Повторный доступ к урокам в любое время', 'Revisit lessons any time'), values: { free: no, pro: yes, aipro: yes } },
+    { label: pick(language, 'Курсту толук бүтүрүү жана сертификат', 'Полное прохождение и сертификат', 'Full course and certificate'), values: { free: no, pro: yes, aipro: yes } },
+    { label: pick(language, 'Жеке AI-ассистент', 'Персональный AI-ассистент', 'Personal AI assistant'), values: { free: no, pro: no, aipro: yes } },
+    { label: pick(language, 'Кодду текшерүү жана талдоо (AI)', 'Проверка и анализ кода (AI)', 'Code review and analysis (AI)'), values: { free: no, pro: no, aipro: yes } },
     { label: pick(language, 'Баасы', 'Цена', 'Price'), values: Object.fromEntries(plans.map((plan) => [plan.id, `${plan.price} ${plan.currency === 'KGS' ? 'сом' : plan.currency}`])) as Record<SubscriptionPlanId, React.ReactNode> }
   ]
   return (

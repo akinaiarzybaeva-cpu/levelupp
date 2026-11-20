@@ -148,7 +148,11 @@ const server = spawn(process.execPath, [path.join(repoRoot, 'backend', 'src', 's
     MANUAL_TRANSFER_BANK_NAME: 'Test Bank',
     MANUAL_TRANSFER_RECIPIENT: 'LevelUp LLC',
     MANUAL_TRANSFER_ACCOUNT: '1234-TEST-0000',
-    MANUAL_TRANSFER_INSTRUCTIONS: 'Test instructions'
+    MANUAL_TRANSFER_INSTRUCTIONS: 'Test instructions',
+    // Wallets checked by the administrator: MBank and Элсом have details, O!Деньги is not connected.
+    PAYMENT_MBANK_ACCOUNT: '0700 000 111',
+    PAYMENT_MBANK_RECIPIENT: 'LevelUp MBank',
+    PAYMENT_ELSOM_ACCOUNT: '0555 000 222'
   },
   stdio: ['ignore', 'pipe', 'pipe']
 })
@@ -161,11 +165,20 @@ function webhook(payload, { secret = WEBHOOK_SECRET } = {}) {
   return fetch(`${BASE}/api/payments/webhook/generic`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Signature': signature }, body: raw })
     .then(async (r) => ({ status: r.status, data: await r.json().catch(() => ({})) }))
 }
-// User purchases use "🟢 НОВАЯ ПОКУПКА"; administrator grants keep the detailed "NEW SUBSCRIPTION PURCHASED!" layout.
-const purchaseMessages = () => telegramMessages.filter((m) => m.text.includes('<b>НОВАЯ ПОКУПКА</b>') || m.text.includes('NEW SUBSCRIPTION PURCHASED!'))
-const purchaseFormatOk = (text, { name, email, plan, price }) =>
-  text.startsWith('🟢 <b>НОВАЯ ПОКУПКА</b>') && text.includes(`👤 Имя: ${name}`) && text.includes(`📧 Email: ${email}`) && text.includes(`📦 Тариф: ${plan}`) &&
-  text.includes(`💰 Стоимость: ${price} сом`) && /📅 Дата: \d{2}\.\d{2}\.\d{4}/.test(text) && text.trimEnd().endsWith('✅ Статус: Активирован')
+// Confirmed payments use "✅ ТӨЛӨМ ЫРАСТАЛДЫ!", DEMO checkouts "🎉 ЖАҢЫ ТАРИФ САТЫП АЛУУ! (DEMO)";
+// administrator grants keep the detailed "NEW SUBSCRIPTION PURCHASED!" layout.
+const CONFIRMED_HEAD = '✅ <b>ТӨЛӨМ ЫРАСТАЛДЫ!</b>'
+const DEMO_HEAD = '🎉 <b>ЖАҢЫ ТАРИФ САТЫП АЛУУ! (DEMO)</b>'
+const REQUEST_HEAD = '🎉 <b>ЖАҢЫ ТАРИФ САТЫП АЛУУ!</b>'
+const purchaseMessages = () => telegramMessages.filter((m) => m.text.startsWith(CONFIRMED_HEAD) || m.text.startsWith(DEMO_HEAD) || m.text.includes('NEW SUBSCRIPTION PURCHASED!'))
+/** The layout requested for the admin chat: user, email, plan, price, date, period, method, order id, status. */
+const planMessageOk = (text, { name, email, plan, price }) =>
+  text.includes(`👤 Колдонуучу: ${name}`) && text.includes(`📧 Email: ${email}`) && text.includes(`💎 Тариф: ${plan}`) &&
+  text.includes(`💰 Баасы: ${price} сом`) && /📅 Сатып алган күнү: \d{2}\.\d{2}\.\d{4}/.test(text) && text.includes('📅 Мөөнөтү: 30 күн') &&
+  text.includes('💳 Төлөм ыкмасы: ') && /🆔 Order ID: <code>LU-[0-9A-F]{8}<\/code>/.test(text) && text.includes('📌 Статусу: ')
+const purchaseFormatOk = (text, details, { demo = false } = {}) =>
+  text.startsWith(demo ? DEMO_HEAD : CONFIRMED_HEAD) && planMessageOk(text, details) &&
+  (demo ? text.includes('DEMO — акча алынган жок') : text.trimEnd().endsWith('📌 Статусу: Ырасталды — тариф активдүү'))
 async function sqlite(readonly = true) {
   const href = new URL(`file:///${path.join(repoRoot, 'backend', 'node_modules', 'better-sqlite3', 'lib', 'index.js').replace(/\\/g, '/')}`).href
   const { default: Database } = await import(href)
@@ -274,13 +287,13 @@ try {
     const days = Math.round((new Date(sub.endsAt) - Date.now()) / DAY)
     return (r.status === 200 && r.data.activated && r.data.kind === 'new' && sub.accessPlan === 'pro' && sub.status === 'active' && days === 30 && sub.pendingOrder === null) || JSON.stringify({ r, sub })
   })
-  await check('Telegram: exactly one "🟢 НОВАЯ ПОКУПКА" message (name, email, plan, price, date, status), no payment data', async () => {
+  await check('Telegram: exactly one "✅ ТӨЛӨМ ЫРАСТАЛДЫ!" message (user, email, plan, price, date, period, method, order, status), no secrets', async () => {
     await waitFor(() => purchaseMessages().length >= 1)
     const msgs = purchaseMessages()
     const text = msgs[0]?.text ?? ''
     const ok = msgs.length === 1 && msgs[0].chat_id === ADMIN_CHAT && msgs[0].parse_mode === 'HTML' &&
       purchaseFormatOk(text, { name: 'Aigerim Test', email: student.email, plan: 'PRO', price: 499 }) &&
-      !/TX-PRO-0001|O!Деньги|card|cvv/i.test(text) && !text.includes(BOT_TOKEN)
+      !/TX-PRO-0001|card|cvv/i.test(text) && !text.includes(BOT_TOKEN)
     return ok || JSON.stringify({ count: msgs.length, text })
   })
   await check('Duplicate "paid" callbacks do not activate twice or send another Telegram message', async () => {
@@ -652,6 +665,95 @@ try {
     return (!cols.some((c) => /card|cvv|expiry|pan/i.test(c)) && payments === 1) || JSON.stringify({ cols, payments })
   })
 
+  // ── Wallet payment (MBank / Элсом / O!Деньги) checked by the administrator ────
+  const walletUser = { name: 'Wallet Buyer', email: 'wallet.buyer@example.test', password: 'Wallet#Pass12' }
+  const walletToken = (await request('/api/auth/register', { method: 'POST', body: walletUser })).data.token
+  const walletBody = (extra = {}) => ({ planId: 'pro', fullName: 'Wallet Buyer', email: walletUser.email, payerName: 'Wallet B.', paymentReference: 'MB-WALLET-0001', paymentMethod: 'MBank', language: 'kg', ...extra })
+  let walletOrderId = null
+
+  await check('Wallets: config lists only methods with payment details (MBank, Элсом, bank) — O!Деньги not connected', async () => {
+    const { data } = await request('/api/payments/manual/config')
+    const ids = (data.methods ?? []).map((m) => m.id)
+    const mbank = data.methods?.find((m) => m.id === 'MBank')
+    return (ids.includes('MBank') && ids.includes('Элсом') && ids.includes('Bank transfer') && !ids.includes('O!Деньги') && mbank.account === '0700 000 111' && mbank.recipient === 'LevelUp MBank') || JSON.stringify(data)
+  })
+  await check('Wallets: a method without payment details or an unknown method is refused (400 METHOD_UNSUPPORTED)', async () => {
+    const odengi = await request('/api/payments/manual', { method: 'POST', token: walletToken, body: walletBody({ paymentMethod: 'O!Деньги' }) })
+    const bogus = await request('/api/payments/manual', { method: 'POST', token: walletToken, body: walletBody({ paymentMethod: 'Crypto' }) })
+    return (odengi.status === 400 && odengi.data.code === 'METHOD_UNSUPPORTED' && bogus.data.code === 'METHOD_UNSUPPORTED') || JSON.stringify([odengi.data, bogus.data])
+  })
+  await check('Wallets: MBank request → PENDING with Order ID, plan NOT active, method stored as MBank', async () => {
+    const r = await request('/api/payments/manual', { method: 'POST', token: walletToken, body: walletBody() })
+    walletOrderId = r.data.orderId
+    const sub = (await request(`/api/subscription/${walletUser.email}`, { token: walletToken })).data
+    const lessons = (await request('/api/courses', { token: walletToken })).data.access.lessonLimit
+    return (r.status === 201 && r.data.status === 'pending' && r.data.paymentMethod === 'MBank' && /^LU-[0-9A-F]{8}$/.test(r.data.orderCode) &&
+      sub.accessPlan === 'free' && sub.pendingOrder?.paymentMethod === 'MBank' && sub.pendingOrder?.orderCode === r.data.orderCode && lessons === 3) || JSON.stringify({ r: r.data, sub, lessons })
+  })
+  await check('Wallets: admin sees method and Order ID; approval activates PRO with method MBank', async () => {
+    const list = (await request('/api/admin/purchase-requests?status=pending', { token: adminToken })).data.requests
+    const row = list.find((x) => x.id === walletOrderId)
+    const r = await request(`/api/admin/purchase-requests/${walletOrderId}/approve`, { method: 'POST', token: adminToken, body: {} })
+    const sub = (await request(`/api/subscription/${walletUser.email}`, { token: walletToken })).data
+    const hist = (await request(`/api/subscription/${walletUser.email}/history`, { token: walletToken })).data
+    const courses = (await request('/api/courses', { token: walletToken })).data
+    return (row?.paymentMethod === 'MBank' && /^LU-/.test(row.orderCode) && r.status === 200 && sub.accessPlan === 'pro' && sub.paymentMethod === 'MBank' &&
+      hist.orders.some((o) => o.orderId === walletOrderId && o.status === 'paid' && o.orderCode === row.orderCode) && courses.access.lessonLimit === null) || JSON.stringify({ row, r: r.data, sub })
+  })
+  await check('Wallets: approval sends a separate "✅ ТӨЛӨМ ЫРАСТАЛДЫ!" message with MBank', async () => {
+    await waitFor(() => telegramMessages.some((m) => m.text.startsWith(CONFIRMED_HEAD) && m.text.includes(walletUser.email)))
+    const text = telegramMessages.find((m) => m.text.startsWith(CONFIRMED_HEAD) && m.text.includes(walletUser.email))?.text ?? ''
+    return (purchaseFormatOk(text, { name: 'Wallet Buyer', email: walletUser.email, plan: 'PRO', price: 599 }) && text.includes('💳 Төлөм ыкмасы: MBank')) || text
+  })
+  await check('Admin extend: +10 days to an active plan; refused without an active plan; users cannot extend', async () => {
+    const before = (await request(`/api/subscription/${walletUser.email}`, { token: walletToken })).data.endsAt
+    const r = await request(`/api/admin/subscriptions/${walletUser.email}`, { method: 'PATCH', token: adminToken, body: { action: 'extend', days: 10 } })
+    const after = (await request(`/api/subscription/${walletUser.email}`, { token: walletToken })).data
+    const added = Math.round((new Date(after.endsAt) - new Date(before)) / DAY)
+    const noPlan = await request(`/api/admin/subscriptions/${second.email}`, { method: 'PATCH', token: adminToken, body: { action: 'extend', days: 10 } })
+    const badDays = await request(`/api/admin/subscriptions/${walletUser.email}`, { method: 'PATCH', token: adminToken, body: { action: 'extend', days: 0 } })
+    const byUser = await request(`/api/admin/subscriptions/${walletUser.email}`, { method: 'PATCH', token: walletToken, body: { action: 'extend', days: 10 } })
+    const hist = (await request(`/api/admin/subscriptions/${walletUser.email}/history`, { token: adminToken })).data.history
+    return (r.status === 200 && added === 10 && after.accessPlan === 'pro' && noPlan.status === 400 && noPlan.data.code === 'NO_ACTIVE_PLAN' && badDays.status === 400 && byUser.status === 403 && hist.some((h) => h.event === 'admin_extend')) || JSON.stringify({ r: r.data, added, noPlan: noPlan.data, badDays: badDays.status, byUser: byUser.status })
+  })
+  await check('Certificates: guest 401; FREE user cannot complete a course or earn one', async () => {
+    const guest = await request('/api/certificates')
+    await request('/api/course-progress', { method: 'POST', token: secondToken, body: { courseId: 'html', completedLessons: 20 } })
+    const free = (await request('/api/certificates', { token: secondToken })).data
+    return (guest.status === 401 && free.canEarn === false && free.certificates.length === 0 && free.completedCourses === 0) || JSON.stringify({ guest: guest.status, free })
+  })
+  let certId = null
+  await check('Certificates: PRO user completing a course gets exactly one certificate, verifiable by ID', async () => {
+    await request('/api/course-progress', { method: 'POST', token: walletToken, body: { courseId: 'html', completedLessons: 20 } })
+    const first = (await request('/api/certificates', { token: walletToken })).data
+    const again = (await request('/api/certificates', { token: walletToken })).data
+    certId = first.certificates[0]?.id
+    const verify = await request(`/api/certificates/verify/${certId}`)
+    const bad = await request('/api/certificates/verify/LU-CERT-0000000000')
+    return (first.canEarn && first.certificates.length === 1 && again.certificates.length === 1 && /^LU-CERT-[0-9A-F]{10}$/.test(certId) &&
+      first.certificates[0].courseId === 'html' && first.certificates[0].holderName === 'Wallet Buyer' && verify.data.valid === true && bad.status === 404) || JSON.stringify({ first, verify: verify.data, bad: bad.status })
+  })
+  await check('Ending-soon reminder: claimed once per paid period (3 days before the end)', async () => {
+    const dbh = await sqlite(false)
+    dbh.prepare('UPDATE user_subscriptions SET ends_at = ? WHERE user_email = ?').run(new Date(Date.now() + 2 * DAY).toISOString(), walletUser.email)
+    const { claimEndingSoonReminders } = await import(new URL(`file:///${path.join(repoRoot, 'backend', 'src', 'billing.js').replace(/\\/g, '/')}`).href)
+    const firstClaim = claimEndingSoonReminders(dbh, 3).filter((r) => r.user_email === walletUser.email)
+    const secondClaim = claimEndingSoonReminders(dbh, 3).filter((r) => r.user_email === walletUser.email)
+    dbh.close()
+    const sub = (await request(`/api/subscription/${walletUser.email}`, { token: walletToken })).data
+    return (firstClaim.length === 1 && firstClaim[0].daysLeft === 2 && secondClaim.length === 0 && sub.remainingDays === 2) || JSON.stringify({ firstClaim, secondClaim, days: sub.remainingDays })
+  })
+  await check('Expiry: when the period ends the plan falls back to FREE and paid lessons lock again', async () => {
+    const dbh = await sqlite(false)
+    dbh.prepare('UPDATE user_subscriptions SET ends_at = ? WHERE user_email = ?').run(new Date(Date.now() - 1000).toISOString(), walletUser.email)
+    dbh.close()
+    const sub = (await request(`/api/subscription/${walletUser.email}`, { token: walletToken })).data
+    const courses = (await request('/api/courses', { token: walletToken })).data
+    const html = courses.courses.find((c) => c.id === 'html')
+    const certs = (await request('/api/certificates', { token: walletToken })).data
+    return (sub.accessPlan === 'free' && courses.access.lessonLimit === 3 && html.lessons.slice(3).every((l) => l.locked && !l.videoUrl) && certs.canEarn === false && certs.certificates.length === 1) || JSON.stringify({ plan: sub.accessPlan, limit: courses.access.lessonLimit, certs })
+  })
+
   // ── Demo Payment (no real charge) ───────────────────────────────────────────
   const cardUser = { name: 'Card Demo', email: 'card.demo@example.test', password: 'CardDemo#Pass12' }
   const cardToken = (await request('/api/auth/register', { method: 'POST', body: cardUser })).data.token
@@ -672,7 +774,7 @@ try {
     const ai = await request('/api/ai/chat', { method: 'POST', token: cardToken, body: { questionId: 'start-programming' } })
     await waitFor(() => telegramMessages.length > beforeAll)
     const text = telegramMessages.at(-1)?.text ?? ''
-    const fmt = purchaseFormatOk(text, { name: 'Card Demo', email: cardUser.email, plan: 'AI PRO', price: 799 })
+    const fmt = purchaseFormatOk(text, { name: 'Card Demo', email: cardUser.email, plan: 'AI PRO', price: 799 }, { demo: true })
     const noSecrets = !text.includes(LEAK.cardNumber) && !text.includes(LEAK.cvv) && !text.includes(LEAK.expiry)
     return (r.status === 201 && r.data.status === 'paid' && r.data.accessPlan === 'aipro' && sub.accessPlan === 'aipro' && ai.status === 200 && telegramMessages.length === beforeAll + 1 && purchaseMessages().length === before + 1 && fmt && noSecrets) || JSON.stringify({ r: r.data, plan: sub.accessPlan, ai: ai.status, text })
   })
@@ -707,10 +809,16 @@ try {
     (await request('/api/payments/demo/config')).data.enabled === true)
 
   // ── Request & review notifications ──────────────────────────────────────────
-  await check('Bank-transfer request: one "📝 НОВАЯ ЗАЯВКА" message per request (pending, not a purchase)', async () => {
-    const reqs = telegramMessages.filter((m) => m.text.startsWith('📝 <b>НОВАЯ ЗАЯВКА</b>'))
+  await check('Purchase request: one "🎉 ЖАҢЫ ТАРИФ САТЫП АЛУУ!" message per request with status "Төлөм күтүлүүдө"', async () => {
+    const reqs = telegramMessages.filter((m) => m.text.startsWith(`${REQUEST_HEAD}\n`))
     const first = reqs.find((m) => m.text.includes('MB-2026-000777'))?.text ?? ''
-    return (reqs.length === 2 && first.includes('👤 Имя: Bakyt Manualov') && first.includes(`📧 Email: ${buyer.email}`) && first.includes('📦 Тариф: PRO') && first.includes('💰 Сумма: 599 сом') && first.includes('Ожидает проверки')) || JSON.stringify({ count: reqs.length, first })
+    const walletMsg = reqs.find((m) => m.text.includes('MB-WALLET-0001'))?.text ?? ''
+    return (reqs.length === 3 && planMessageOk(first, { name: 'Bakyt Manualov', email: buyer.email, plan: 'PRO', price: 599 }) && first.includes('Төлөм күтүлүүдө') &&
+      walletMsg.includes('💳 Төлөм ыкмасы: MBank')) || JSON.stringify({ count: reqs.length, first, walletMsg })
+  })
+  await check('Rejection sends a separate "❌ ТӨЛӨМ ЧЕТКЕ КАГЫЛДЫ" message with the reason', async () => {
+    const rejected = telegramMessages.filter((m) => m.text.startsWith('❌ <b>ТӨЛӨМ ЧЕТКЕ КАГЫЛДЫ</b>'))
+    return (rejected.length === 1 && rejected[0].text.includes('MB-2026-000888') && rejected[0].text.includes('Payment not found')) || JSON.stringify(rejected.map((m) => m.text))
   })
   await check('Review: a new review sends one "⭐ НОВЫЙ ОТЗЫВ" message; editing it sends nothing', async () => {
     const isReview = (m) => m.text.startsWith('⭐ <b>НОВЫЙ ОТЗЫВ</b>') && m.text.includes(buyer.email)

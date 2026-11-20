@@ -575,6 +575,7 @@ export type BillingState = {
   isLoggedIn: boolean
   isAdmin: boolean
   userEmail: string | null
+  userName?: string | null
   refreshSubscription: () => Promise<UserSubscription | null>
 }
 
@@ -584,6 +585,7 @@ export const BillingContext = createContext<BillingState>({
   isLoggedIn: false,
   isAdmin: false,
   userEmail: null,
+  userName: null,
   refreshSubscription: async () => null
 })
 

@@ -34,7 +34,7 @@ export type UserSubscription = {
   purchasedAt?: string | null
   cancelledAt?: string | null
   grantedByAdmin?: boolean
-  pendingOrder?: { orderId: string; planId: SubscriptionPlanId; amount: number; paymentMethod: string; createdAt: string; paymentUrl: string | null; provider?: string; paymentReference?: string | null } | null
+  pendingOrder?: { orderId: string; orderCode?: string; planId: SubscriptionPlanId; amount: number; paymentMethod: string; createdAt: string; paymentUrl: string | null; provider?: string; paymentReference?: string | null } | null
   lastReviewNote?: string | null
   accountId?: string | null
   lastPaymentStatus?: string | null
