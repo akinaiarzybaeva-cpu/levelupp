@@ -63,7 +63,6 @@ const allowedOrigins = new Set([
   'http://localhost:4173',
   'http://127.0.0.1:4173',
   'https://levelupp-cyan.vercel.app',
-  'https://levellupp.netlify.app',
   'https://localhost:5173',
   'https://127.0.0.1:5173',
   // Extra production/custom domains, comma separated (e.g. https://levelup.kg,https://www.levelup.kg)
