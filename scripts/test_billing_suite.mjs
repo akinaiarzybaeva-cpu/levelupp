@@ -127,6 +127,7 @@ const server = spawn(process.execPath, [path.join(repoRoot, 'backend', 'src', 's
     SystemRoot: process.env.SystemRoot,
     PORT: String(PORT),
     DATABASE_PATH: path.join(workDir, 'billing.sqlite'),
+    DATABASE_URL: '',
     ADMIN_EMAIL,
     ADMIN_INITIAL_PASSWORD: adminPassword,
     FRONTEND_URL: 'http://localhost:5173',

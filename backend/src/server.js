@@ -5,6 +5,7 @@ import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { config } from './config/config.js'
 import { db } from './config/db.js'
+import { initPostgresSync } from './config/pgSync.js'
 import { activateSubscription, cancelSubscription, claimEndingSoonReminders, expireDueSubscriptions, extendSubscription, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
 import { initTelegram, notifyPurchase, notifyPurchaseRejected, notifyPurchaseRequest, notifyRegistration, notifyReview, orderCode, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
 import { QUESTION_NOT_ALLOWED_MESSAGE, getKnowledge, getPreparedAnswer, resolveAllowedQuestion } from './aiQuestions.js'
@@ -3631,6 +3632,9 @@ app.use((err, _req, res, _next) => {
 })
 
 // ─── Initialize Seed Data & Start Server ──────────────────────────────────────
+
+// PostgreSQL (DATABASE_URL) is the durable store: load it into SQLite and mirror every write back.
+await initPostgresSync(db, config.databaseUrl)
 
 // Housekeeping: drop expired/revoked sessions and stale reset tokens so these
 // tables do not grow forever. Only rows that can never be used again are removed.
