@@ -25,7 +25,39 @@ function createTransporter() {
  * Send an email. Returns true on success, false if email is not configured.
  * Throws if the email is configured but sending fails.
  */
+/** Parse "Name <address>" (or a bare address) for the Brevo API. */
+function parseSender(value) {
+  const match = String(value ?? '').match(/^\s*(.*?)\s*<([^>]+)>\s*$/)
+  return match ? { name: match[1] || undefined, email: match[2].trim() } : { email: String(value ?? '').trim() }
+}
+
+/**
+ * Brevo (HTTPS API). Used when BREVO_API_KEY is set: works on hosts that block
+ * outbound SMTP ports (e.g. Render free instances). The sender address
+ * (EMAIL_FROM or EMAIL_USER) must be a verified sender in Brevo.
+ */
+async function sendViaBrevo({ to, subject, html, text }) {
+  const apiKey = String(process.env.BREVO_API_KEY ?? '').trim()
+  const sender = parseSender(process.env.EMAIL_FROM || process.env.EMAIL_USER || '')
+  if (!sender.email) throw new Error('BREVO_API_KEY is set but EMAIL_FROM / EMAIL_USER (verified sender) is empty')
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': apiKey, 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ sender, to: [{ email: to }], subject, htmlContent: html, textContent: text ?? html.replace(/<[^>]+>/g, '') }),
+    signal: AbortSignal.timeout(15000)
+  })
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(`Brevo API ${response.status}: ${detail.slice(0, 300)}`)
+  }
+  return true
+}
+
 export async function sendEmail({ to, subject, html, text }) {
+  if (String(process.env.BREVO_API_KEY ?? '').trim()) {
+    return sendViaBrevo({ to, subject, html, text })
+  }
+
   const transport = createTransporter()
   if (!transport) {
     // Email not configured — log to console so the admin can retrieve the token locally
