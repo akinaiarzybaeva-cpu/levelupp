@@ -10,7 +10,6 @@ import AdminDashboard from './AdminDashboard'
 import UserTable from './UserTable'
 import TelegramNotification from './TelegramNotification'
 import { AdminLanguageSwitch, useAdminT } from './adminI18n'
-import AdminFirstLogin from './AdminFirstLogin'
 import { useLanguage } from '../appShared'
 
 // ─── Users section ────────────────────────────────────────────────────────────
@@ -2181,25 +2180,7 @@ function PurchasesSection({ onToast }: { onToast: (msg: string, kind: ToastKind)
   )
 }
 
-/**
- * Checks the account first: while the initial password is still in use only the
- * "change password" screen is shown (the backend enforces the same rule).
- */
 export default function AdminPanel({ user, onLogout }: AdminPanelProps) {
-  const t = useAdminT()
-  const [account, setAccount] = useState<{ email: string; mustChangePassword: boolean } | null>(null)
-  const [accountError, setAccountError] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    adminFetch<{ email: string; mustChangePassword: boolean }>('/api/admin/account')
-      .then((data) => { if (!cancelled) setAccount(data) })
-      .catch(() => { if (!cancelled) setAccountError(true) })
-    return () => { cancelled = true }
-  }, [])
-
-  if (!account && !accountError) return <div className="admin-login-shell"><div className="admin-loading-state">{t("Loading…")}</div></div>
-  if (account?.mustChangePassword) return <AdminFirstLogin adminEmail={account.email} onLogout={onLogout} />
   return <AdminPanelContent user={user} onLogout={onLogout} />
 }
 

@@ -291,22 +291,19 @@ try {
     adminToken = data.token
     return (status === 200 && data.user.role === 'Admin') || `${status} ${JSON.stringify(data)}`
   })
-  await check('First sign-in: the admin created from ADMIN_INITIAL_PASSWORD must change it (flag in login + /api/admin/account)', async () => {
+  await check('First sign-in: the admin panel opens right away (no forced password change)', async () => {
     const login = await request('/api/auth/login', { method: 'POST', body: { email: ADMIN_EMAIL, password: adminPassword } })
     adminToken = login.data.token
     const account = await request('/api/admin/account', { token: adminToken })
-    return (login.data.user.mustChangePassword === true && account.status === 200 && account.data.mustChangePassword === true && account.data.email === ADMIN_EMAIL) || JSON.stringify({ login: login.data.user, account: account.data })
-  })
-  await check('First sign-in: every other admin API answers 403 PASSWORD_CHANGE_REQUIRED until the password is changed', async () => {
     const stats = await request('/api/admin/stats', { token: adminToken })
     const users = await request('/api/admin/users', { token: adminToken })
-    return (stats.status === 403 && stats.data.code === 'PASSWORD_CHANGE_REQUIRED' && users.status === 403) || JSON.stringify({ stats, users: users.status })
+    return (login.data.user.mustChangePassword === false && account.data.mustChangePassword === false && stats.status === 200 && users.status === 200) || JSON.stringify({ login: login.data.user, account: account.data, stats: stats.status, users: users.status })
   })
-  await check('First sign-in: wrong current password is rejected', async () => {
+  await check('Password change: wrong current password is rejected', async () => {
     const r = await request('/api/admin/settings/password', { method: 'PUT', token: adminToken, body: { currentPassword: 'not-the-password-1', newPassword: 'FirstChange#2026', confirmPassword: 'FirstChange#2026' } })
     return (r.status === 400 && /incorrect/i.test(r.data.error)) || `${r.status} ${r.data.error}`
   })
-  await check('First sign-in: changing the initial password unlocks the panel and revokes the old session', async () => {
+  await check('Password change: changing the initial password revokes the old session', async () => {
     const next = `Adm-${crypto.randomBytes(9).toString('base64url')}7`
     const change = await request('/api/admin/settings/password', { method: 'PUT', token: adminToken, body: { currentPassword: adminPassword, newPassword: next, confirmPassword: next } })
     const oldSession = await request('/api/admin/account', { token: adminToken })

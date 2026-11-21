@@ -508,19 +508,11 @@ function requireAdminAuth(req, res, next) {
     return
   }
 
-  // First sign-in with the initial password: only the password change (and the account info) is allowed.
-  const routePath = String(req.originalUrl ?? '').split('?')[0]
-  if (profile.must_change_password && !ADMIN_ROUTES_BEFORE_PASSWORD_CHANGE.has(`${req.method} ${routePath}`)) {
-    res.status(403).json({ error: 'Change the initial password before using the admin panel.', code: 'PASSWORD_CHANGE_REQUIRED' })
-    return
-  }
-
   req.adminEmail = userEmail
   req.adminProfile = profile
   next()
 }
 
-const ADMIN_ROUTES_BEFORE_PASSWORD_CHANGE = new Set(['PUT /api/admin/settings/password', 'GET /api/admin/account'])
 
 function getPublicUserRecord(profile) {
   const firstName = profile.first_name ?? ''
@@ -629,8 +621,6 @@ function ensureSingleAdmin() {
   })
 
   db.prepare("UPDATE user_profiles SET role = 'User', updated_at = ? WHERE role = 'Admin' AND user_email != ?").run(nowIso, adminEmail)
-  // The initial password comes from an env var: the administrator must replace it at first sign-in.
-  db.prepare('UPDATE user_profiles SET must_change_password = 1 WHERE user_email = ?').run(adminEmail)
   // eslint-disable-next-line no-console
   console.log(`[ADMIN SETUP] Administrator account created: ${adminEmail}`)
 }
@@ -3635,6 +3625,8 @@ app.use((err, _req, res, _next) => {
 
 // PostgreSQL (DATABASE_URL) is the durable store: load it into SQLite and mirror every write back.
 await initPostgresSync(db, config.databaseUrl)
+// The forced "change the initial password" step was removed: clear any leftover flags.
+db.prepare('UPDATE user_profiles SET must_change_password = 0 WHERE must_change_password != 0').run()
 
 // Housekeeping: drop expired/revoked sessions and stale reset tokens so these
 // tables do not grow forever. Only rows that can never be used again are removed.
