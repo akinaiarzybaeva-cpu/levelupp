@@ -3,8 +3,10 @@ import { API_BASE_URL, withAuthHeaders } from './api'
 type Lang = 'kg' | 'ru' | 'en'
 
 type AiRequest = {
-  /** One of the 15 prepared questions (frontend/src/components/aiKeyQuestions.ts). */
-  questionId: string
+  /** The question text (free text, or the text of a suggested question). */
+  question: string
+  /** Set when one of the 15 suggested questions was clicked (frontend/src/components/aiKeyQuestions.ts). */
+  questionId?: string
   language: Lang
 }
 
@@ -52,6 +54,11 @@ const AI_ERROR_TEXT: Record<string, Record<Lang, string>> = {
     ru: 'Пожалуйста, выберите один из 15 подготовленных вопросов. Ассистент отвечает только на специальные вопросы из списка.',
     en: 'Please select one of the 15 prepared questions. The assistant only answers questions from the provided list.',
   },
+  AI_AUTH_FAILED: {
+    kg: 'AI кызматынын ачкычы туура эмес же жараксыз. Администраторго кайрылыңыз.',
+    ru: 'Ключ AI-сервиса неверен или недействителен. Обратитесь к администратору.',
+    en: 'The AI service key is invalid. Please contact the administrator.',
+  },
   FORBIDDEN: {
     kg: 'AI жардамчы активдүү AI PRO тарифи менен гана жеткиликтүү.',
     ru: 'AI-ассистент доступен только с активным тарифом AI PRO.',
@@ -64,14 +71,14 @@ const AI_ERROR_TEXT: Record<string, Record<Lang, string>> = {
   },
 }
 
-export async function callAiAssistant({ questionId, language }: AiRequest): Promise<AiAnswer> {
+export async function callAiAssistant({ question, questionId, language }: AiRequest): Promise<AiAnswer> {
   // Always go through our backend: it checks the session and the AI PRO subscription
   // and holds the API key. There is intentionally no direct-to-provider override.
   // Plain fetch: AI errors (502/503 from the provider) must not be auto-retried, every call is billed.
   const response = await fetch(`${API_BASE_URL}/api/ai/chat`, {
     method: 'POST',
     headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ questionId, language }),
+    body: JSON.stringify(questionId ? { questionId, language } : { question, language }),
   })
 
   const data = await response.json().catch(() => ({})) as { answer?: string; error?: string; code?: string; questionId?: string; question?: string; questionMessageId?: string; answerId?: string }

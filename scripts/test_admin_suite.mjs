@@ -433,11 +433,11 @@ try {
     await request(`/api/admin/subscriptions/${userA.email}`, { method: 'PATCH', token: adminToken, body: { action: 'revoke' } })
     return (await request(`/api/subscription/${userA.email}`, { token: tokenA })).data.status === 'expired'
   })
-  // The assistant answers from the LevelUp knowledge base: it works without ANTHROPIC_API_KEY.
-  await check('Admin grants AI Pro -> the assistant answers a prepared question (knowledge base, no API key needed)', async () => {
+  // No AI key in this suite: access is granted, the provider answers 503 AI_NOT_CONFIGURED (not 403).
+  await check('Admin grants AI Pro -> access passes; without an AI key the chat answers 503 AI_NOT_CONFIGURED', async () => {
     await request('/api/admin/ai-pro/user', { method: 'POST', token: adminToken, body: { userEmail: userA.email, action: 'activate', days: 30 } })
     const { status, data } = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { questionId: 'html-what', language: 'en' } })
-    return (status === 200 && data.source === 'knowledge-base' && /HTML/.test(data.answer)) || JSON.stringify({ status, data })
+    return (status === 503 && data.code === 'AI_NOT_CONFIGURED') || JSON.stringify({ status, data })
   })
   await check('"+30 days" extends an active AI Pro grant from its end date', async () => {
     const first = (await request(`/api/subscription/${userA.email}`, { token: tokenA })).data.endsAt
@@ -446,12 +446,12 @@ try {
     const diffDays = (new Date(second) - new Date(first)) / 86400000
     return Math.round(diffDays) === 30 || `diff=${diffDays}`
   })
-  await check('AI Pro system switch off -> 503 AI_DISABLED, on -> the assistant answers again', async () => {
+  await check('AI Pro system switch off -> 503 AI_DISABLED, on -> the request reaches the assistant again', async () => {
     await request('/api/admin/ai-pro/system', { method: 'PATCH', token: adminToken, body: { enabled: false } })
     const off = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { questionId: 'css-what' } })
     await request('/api/admin/ai-pro/system', { method: 'PATCH', token: adminToken, body: { enabled: true } })
     const on = await request('/api/ai/chat', { method: 'POST', token: tokenA, body: { questionId: 'css-what' } })
-    return (off.status === 503 && off.data.code === 'AI_DISABLED' && on.status === 200 && on.data.questionId === 'css-what') || JSON.stringify({ off: off.data, on: on.data })
+    return (off.status === 503 && off.data.code === 'AI_DISABLED' && on.data.code === 'AI_NOT_CONFIGURED') || JSON.stringify({ off: off.data, on: on.data })
   })
 
   // ── Payments (provider intentionally NOT configured in tests) ───────────────

@@ -1,21 +1,37 @@
-// AI Pro assistant backed by the Claude API (official Anthropic SDK).
-// Configuration (server-side only, never exposed to the frontend):
-//   ANTHROPIC_API_KEY   - required; without it the endpoint answers 503 AI_NOT_CONFIGURED
-//   AI_MODEL            - optional, defaults to claude-opus-5-5
-//   ANTHROPIC_BASE_URL  - optional, read by the SDK itself (used by local tests with a mock server)
+// AI Pro assistant. Two providers, chosen by which key is set (server-side only, never sent to the frontend):
+//   GEMINI_API_KEY      - Google Gemini (preferred when set)
+//   GEMINI_MODEL        - optional, default gemini-3.5-flash; when it is overloaded the fallbacks below are tried
+//   GEMINI_BASE_URL     - optional (used by local tests with a mock server)
+//   ANTHROPIC_API_KEY   - Claude, used only when GEMINI_API_KEY is not set
+//   AI_MODEL            - optional Claude model, default claude-opus-5-5
+//   ANTHROPIC_BASE_URL  - optional, read by the Anthropic SDK itself (local tests)
+// Without any key the endpoint answers 503 AI_NOT_CONFIGURED.
 import Anthropic from '@anthropic-ai/sdk'
 
-const DEFAULT_MODEL = 'claude-opus-5-5'
+const DEFAULT_CLAUDE_MODEL = 'claude-opus-5-5'
+const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash'
+// Tried in this order when the chosen model is overloaded (503), rate-limited (429) or retired (404).
+const GEMINI_FALLBACK_MODELS = ['gemini-3.1-flash-lite', 'gemini-flash-lite-latest', 'gemini-flash-latest']
 const LANGUAGE_NAMES = { kg: 'Kyrgyz (кыргыз тили)', ru: 'Russian', en: 'English' }
 
 let cachedClient = null
 let cachedKey = ''
 
 export function aiConfig() {
+  const geminiKey = String(process.env.GEMINI_API_KEY ?? '').trim()
+  if (geminiKey) {
+    return {
+      configured: true,
+      provider: 'gemini',
+      model: String(process.env.GEMINI_MODEL ?? '').trim() || DEFAULT_GEMINI_MODEL,
+      apiKey: geminiKey,
+    }
+  }
   const apiKey = String(process.env.ANTHROPIC_API_KEY ?? '').trim()
   return {
     configured: Boolean(apiKey),
-    model: String(process.env.AI_MODEL ?? '').trim() || DEFAULT_MODEL,
+    provider: apiKey ? 'anthropic' : null,
+    model: String(process.env.AI_MODEL ?? '').trim() || DEFAULT_CLAUDE_MODEL,
     apiKey,
   }
 }
@@ -49,22 +65,14 @@ function buildSystemPrompt(language, topic) {
   ].join('\n')
 }
 
-// history: optional [{role:'user'|'assistant', content:string}] from the current chat (already validated).
-export async function askAssistant({ question, topic, language, history = [] }) {
-  const { configured, model, apiKey } = aiConfig()
-  if (!configured) {
-    throw new AiError('AI assistant is not configured on the server (ANTHROPIC_API_KEY is missing).', 503, 'AI_NOT_CONFIGURED')
-  }
-
+async function askClaude({ apiKey, model, system, messages }) {
   const client = getClient(apiKey)
-  const messages = [...history, { role: 'user', content: question }]
-
   let response
   try {
     response = await client.beta.messages.create({
       model,
       max_tokens: 16000,
-      system: buildSystemPrompt(language, topic),
+      system,
       output_config: { effort: 'medium' },
       betas: ['server-side-fallback-2026-07-01'],
       fallbacks: 'default',
@@ -89,18 +97,87 @@ export async function askAssistant({ question, topic, language, history = [] }) 
   if (response.stop_reason === 'refusal') {
     throw new AiError('The assistant cannot answer this question. Please rephrase it.', 422, 'AI_REFUSED')
   }
+  const answer = response.content.filter((block) => block.type === 'text').map((block) => block.text).join('').trim()
+  return { answer, model: response.model, truncated: response.stop_reason === 'max_tokens' }
+}
 
-  const answer = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('')
-    .trim()
+const GEMINI_BLOCKED = ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'RECITATION', 'SPII']
 
-  if (!answer) {
-    throw new AiError('The AI response was empty. Please try a different question.', 502, 'AI_EMPTY')
+async function askGemini({ apiKey, model, system, messages }) {
+  const baseUrl = String(process.env.GEMINI_BASE_URL ?? '').trim().replace(/\/+$/, '') || 'https://generativelanguage.googleapis.com'
+  const contents = messages.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }))
+  // Gemini 3+ models think before answering; 'low' keeps answers fast (seconds instead of a minute).
+  const bodyFor = (name) => JSON.stringify({
+    systemInstruction: { parts: [{ text: system }] },
+    contents,
+    generationConfig: { maxOutputTokens: 8192, ...(/^gemini-[12]\./.test(name) ? {} : { thinkingConfig: { thinkingLevel: 'low' } }) },
+  })
+
+  const models = [model, ...GEMINI_FALLBACK_MODELS.filter((m) => m !== model)]
+  let lastStatus = 0
+  const deadline = Date.now() + 100_000
+  for (const name of models) {
+    const timeLeft = deadline - Date.now()
+    if (timeLeft < 5_000) break
+    let response
+    try {
+      response = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(name)}:generateContent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+        body: bodyFor(name),
+        signal: AbortSignal.timeout(Math.min(45_000, timeLeft)),
+      })
+    } catch (error) {
+      // Timeout or network error on this model: try the next one.
+      lastStatus = 0
+      // eslint-disable-next-line no-console
+      console.warn(`[AI] Gemini ${name} failed: ${error instanceof Error ? error.name : error}`)
+      continue
+    }
+    const data = await response.json().catch(() => ({}))
+    if (response.ok) {
+      const candidate = data.candidates?.[0]
+      if (!candidate && data.promptFeedback?.blockReason) {
+        throw new AiError('The assistant cannot answer this question. Please rephrase it.', 422, 'AI_REFUSED')
+      }
+      const answer = (candidate?.content?.parts ?? []).filter((p) => typeof p.text === 'string' && !p.thought).map((p) => p.text).join('').trim()
+      if (!answer && GEMINI_BLOCKED.includes(candidate?.finishReason)) {
+        throw new AiError('The assistant cannot answer this question. Please rephrase it.', 422, 'AI_REFUSED')
+      }
+      return { answer, model: data.modelVersion || name, truncated: candidate?.finishReason === 'MAX_TOKENS' }
+    }
+    lastStatus = response.status
+    const message = String(data.error?.message ?? '')
+    // eslint-disable-next-line no-console
+    console.warn(`[AI] Gemini ${name} answered ${response.status}: ${message.slice(0, 200)}`)
+    if (response.status === 401 || response.status === 403 || (response.status === 400 && /api key/i.test(message))) {
+      throw new AiError('AI provider rejected the server credentials.', 503, 'AI_AUTH_FAILED')
+    }
+    if (![404, 429, 500, 503].includes(response.status)) {
+      throw new AiError('AI provider rejected the request.', 502, 'AI_BAD_REQUEST')
+    }
+  }
+  if (lastStatus === 429) throw new AiError('AI assistant is busy. Please try again in a minute.', 429, 'AI_RATE_LIMITED')
+  throw new AiError('AI provider is temporarily unavailable.', 502, 'AI_PROVIDER_ERROR')
+}
+
+// history: optional [{role:'user'|'assistant', content:string}] earlier turns of this user's chat (read from the server DB).
+export async function askAssistant({ question, topic, language, history = [] }) {
+  const { configured, provider, model, apiKey } = aiConfig()
+  if (!configured) {
+    throw new AiError('AI assistant is not configured on the server (GEMINI_API_KEY is missing).', 503, 'AI_NOT_CONFIGURED')
   }
 
-  return { answer, model: response.model, truncated: response.stop_reason === 'max_tokens' }
+  const system = buildSystemPrompt(language, topic)
+  const messages = [...history, { role: 'user', content: question }]
+  const result = provider === 'gemini'
+    ? await askGemini({ apiKey, model, system, messages })
+    : await askClaude({ apiKey, model, system, messages })
+
+  if (!result.answer) {
+    throw new AiError('The AI response was empty. Please try a different question.', 502, 'AI_EMPTY')
+  }
+  return result
 }
 
 // ─── Chat history (per authenticated user, stored server-side) ───────────────

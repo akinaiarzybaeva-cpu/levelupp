@@ -1,13 +1,13 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Clock3, Info, Lock, MessageSquareText, Plus, SendHorizonal, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowLeft, Clock3, Lock, MessageSquareText, Plus, SendHorizonal, Sparkles, Trash2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { AiServiceError, callAiAssistant, clearAiHistory, deleteAiExchange, fetchAiHistory, fetchAiKnowledge, type KnowledgeItem } from '../aiService'
+import { callAiAssistant, clearAiHistory, deleteAiExchange, fetchAiHistory, fetchAiKnowledge, type KnowledgeItem } from '../aiService'
 import siteLogo from '../assets/logo.webp'
 import { type UserSubscription } from '../subscriptionService'
 import { translations, hasActiveAiAccess, LanguageSetterContext, type Lang, type Message } from '../appShared'
 import LanguageSwitcher from './LanguageSwitcher'
 import AIMessage from './AIMessage'
-import { AI_CATEGORIES, AI_KEY_QUESTIONS, AI_UI, findKeyQuestion, type AiCategory } from './aiKeyQuestions'
+import { AI_CATEGORIES, AI_KEY_QUESTIONS, AI_UI, type AiCategory } from './aiKeyQuestions'
 
 /** Kept for backwards compatibility: the suggestions are the 15 prepared questions. */
 export const aiSuggestions: Record<Lang, string[]> = {
@@ -91,7 +91,6 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
   // Knowledge base per language (question + answer by id), loaded from the server for AI Pro users.
   const [knowledge, setKnowledge] = useState<Partial<Record<Lang, Record<string, KnowledgeItem>>>>({})
   const [error, setError] = useState<string | null>(null)
-  const [notAllowed, setNotAllowed] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [historyLoaded, setHistoryLoaded] = useState(false)
   const [historyFailed, setHistoryFailed] = useState(false)
@@ -142,50 +141,37 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
 
   const scrollMainIntoView = () => window.setTimeout(() => mainRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30)
 
-  const showNotAllowed = () => {
-    setNotAllowed(true)
-    setView('questions')
-    scrollMainIntoView()
-  }
-
-  const ask = async (questionId: string) => {
-    if (isLoading || !isAiUnlocked) return
-    const question = AI_KEY_QUESTIONS.find((q) => q.id === questionId)
-    if (!question) { showNotAllowed(); return }
+  // Any question is answered by the AI; a clicked suggestion sends its id (the server uses its text).
+  const ask = async (text: string, questionId?: string) => {
+    const question = text.trim()
+    if (isLoading || !isAiUnlocked || !question) return
 
     setError(null)
-    setNotAllowed(false)
     setConfirmClear(false)
     setView('answer')
+    scrollMainIntoView()
     setIsLoading(true)
     const tempId = `pending-${Date.now()}`
-    setMessages((current) => [...current, { id: tempId, role: 'user', text: question.text[language], questionId, createdAt: new Date().toISOString() }])
+    setMessages((current) => [...current, { id: tempId, role: 'user', text: question, createdAt: new Date().toISOString() }])
 
     try {
-      // The server checks the id and returns the prepared answer from the LevelUp knowledge base.
-      const result = await callAiAssistant({ questionId, language })
-      const answer: ChatMessage = { id: result.answerId ?? `${Date.now()}-ai`, role: 'assistant', text: result.answer, questionId: result.questionId ?? questionId, createdAt: new Date().toISOString() }
+      const result = await callAiAssistant({ question, questionId, language })
+      const answer: ChatMessage = { id: result.answerId ?? `${Date.now()}-ai`, role: 'assistant', text: result.answer, createdAt: new Date().toISOString() }
       setMessages((current) => [...current.map((m) => (m.id === tempId ? { ...m, id: result.questionMessageId ?? tempId, text: result.question ?? m.text } : m)), answer])
     } catch (err) {
       setMessages((current) => current.filter((m) => m.id !== tempId))
-      if (err instanceof AiServiceError && err.code === 'QUESTION_NOT_ALLOWED') showNotAllowed()
-      else setError(err instanceof Error ? err.message : t.generic.error)
+      if (!questionId) setInput(question)
+      setError(err instanceof Error ? err.message : t.generic.error)
     } finally {
       setIsLoading(false)
     }
   }
 
-  // Typed text is answered only when it IS one of the 15 questions; anything else gets the notice.
   const submitTyped = () => {
     const text = input.trim()
     if (!text || isLoading) return
-    const match = findKeyQuestion(text)
     setInput('')
-    if (!match) {
-      showNotAllowed()
-      return
-    }
-    void ask(match.id)
+    void ask(text)
   }
 
   const handleSubmit = (event: React.FormEvent) => {
@@ -288,7 +274,7 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
         <Link className="ai-chat-brand" to="/dashboard">
           <img src={siteLogo} alt="LevelUp" className="ai-chat-brand-logo" />
         </Link>
-        <button type="button" className="ai-chat-new-btn" onClick={() => { setNotAllowed(false); setView('questions'); if (messages.length) setConfirmClear(true) }} disabled={isLoading}>
+        <button type="button" className="ai-chat-new-btn" onClick={() => { setView('questions'); if (messages.length) setConfirmClear(true) }} disabled={isLoading}>
           <MessageSquareText size={18} />
           <span>{t.ai.newChat}</span>
           <Plus size={16} />
@@ -325,13 +311,7 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
 
         {view === 'questions' ? (
           <>
-            {notAllowed && (
-              <div className="ai-not-allowed" role="alert">
-                <Info size={18} />
-                <p>{ui.notAllowed}</p>
-              </div>
-            )}
-            <KeyQuestions language={language} locked={false} disabled={isLoading} pricingPath={pricingPath} onAsk={(id) => { void ask(id) }} />
+            <KeyQuestions language={language} locked={false} disabled={isLoading} pricingPath={pricingPath} onAsk={(id) => { const q = AI_KEY_QUESTIONS.find((item) => item.id === id); if (q) void ask(q.text[language], id) }} />
             {messages.length > 0 && (
               <button type="button" className="ai-msg-action ai-open-answers" onClick={() => setView('answer')}>
                 <MessageSquareText size={14} /><span>{ui.answerTitle} · {messages.filter((m) => m.role === 'assistant').length}</span>
@@ -341,7 +321,7 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
         ) : (
           <>
             <div className="ai-chat-toolbar">
-              <button type="button" className="ai-back-btn" onClick={() => { setView('questions'); setNotAllowed(false) }}>
+              <button type="button" className="ai-back-btn" onClick={() => setView('questions')}>
                 <ArrowLeft size={16} /><span>{ui.backToQuestions}</span>
               </button>
               {confirmClear ? (
@@ -399,7 +379,7 @@ export default function AIChat({ language, subscription, userEmail, pricingPath 
               onKeyDown={handleInputKeyDown}
               placeholder={ui.placeholder}
               rows={2}
-              maxLength={300}
+              maxLength={2000}
               disabled={isLoading}
             />
             <button type="submit" className="ai-chat-send-btn" disabled={isLoading || !input.trim()} aria-label={ui.send} title={ui.send}>

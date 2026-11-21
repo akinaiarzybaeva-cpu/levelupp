@@ -810,9 +810,9 @@ function AiProSection({ onToast }: { onToast: (msg: string, kind: ToastKind) => 
 
       {aiProvider && (
         <p className="admin-hint">
-          {t("AI provider (Claude API):")} {aiProvider.configured
+          {t("AI provider (Gemini API):")} {aiProvider.configured
             ? <span className="admin-pill admin-pill-sentence success">{t("Configured ·")} {aiProvider.model}</span>
-            : <span className="admin-pill admin-pill-sentence danger">{t("Not configured — set ANTHROPIC_API_KEY on the backend")}</span>}
+            : <span className="admin-pill admin-pill-sentence danger">{t("Not configured — set GEMINI_API_KEY on the backend")}</span>}
         </p>
       )}
 

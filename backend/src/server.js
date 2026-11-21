@@ -8,8 +8,8 @@ import { db } from './config/db.js'
 import { initPostgresSync } from './config/pgSync.js'
 import { activateSubscription, cancelSubscription, claimEndingSoonReminders, expireDueSubscriptions, extendSubscription, formatSubscriptionForUser, getAccessPlan, getPlanById, initBilling, lessonLimitFor, listHistory, listPlans, PLAN_RANK, recordHistory, revokeSubscription, updatePlan } from './billing.js'
 import { initTelegram, notifyPurchase, notifyPurchaseRejected, notifyPurchaseRequest, notifyRegistration, notifyReview, orderCode, sendTestNotification, setPurchaseNotificationsEnabled, telegramStatus } from './telegram.js'
-import { QUESTION_NOT_ALLOWED_MESSAGE, getKnowledge, getPreparedAnswer, resolveAllowedQuestion } from './aiQuestions.js'
-import { aiConfig, clearAiHistory, deleteAiExchange, initAiHistory, listAiHistory, saveAiExchange } from './ai.js'
+import { getKnowledge, resolveAllowedQuestion } from './aiQuestions.js'
+import { AiError, aiConfig, askAssistant, clearAiHistory, deleteAiExchange, initAiHistory, listAiHistory, saveAiExchange } from './ai.js'
 import { createProviderOrder, normalizeWebhookPayload, verifyWebhookSignature } from './config/provider.js'
 import { sendEmail, buildBillingEmail, buildPasswordResetEmail, buildPasswordChangedEmail, buildAdminResetCodeEmail, emailLanguage } from './config/email.js'
 import { initAdminReset, registerAdminResetRoutes } from './adminReset.js'
@@ -1709,7 +1709,7 @@ app.get('/api/admin/ai-pro', adminApiLimiter, requireAdminAuth, (_req, res) => {
 
     const ai = aiConfig()
     res.json({
-      provider: { configured: ai.configured, model: ai.model },
+      provider: { configured: ai.configured, name: ai.provider, model: ai.model },
       systemEnabled,
       activeAiProUsers: Number(activeCountRow?.count ?? 0),
       totalAiProGrants: Number(totalAiProRow?.count ?? 0),
@@ -1801,25 +1801,57 @@ function requireAiProUser(req, res) {
   return userEmail
 }
 
-// The assistant answers ONLY the 15 prepared questions, from the LevelUp knowledge base
-// (backend/src/aiKnowledge). The question is chosen by its id; a text is accepted only when it is
-// exactly one of the 45 prepared questions. Nothing is sent to an external AI provider.
-app.post('/api/ai/chat', (req, res) => {
+// Every question is answered by the AI provider (Gemini when GEMINI_API_KEY is set).
+// The client sends free text, or the id of one of the 15 suggested questions (its text is then taken
+// in the chosen language). Context = the last turns of this user's chat from the server database;
+// any history sent by the client is ignored.
+const AI_QUESTION_MAX = 2000
+const AI_CONTEXT_MESSAGES = 10
+const aiChatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Math.max(1, Number(process.env.AI_CHAT_RATE_LIMIT_MAX) || 20),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many questions. Please wait a minute.', code: 'AI_RATE_LIMITED' },
+})
+
+app.post('/api/ai/chat', aiChatLimiter, async (req, res) => {
   try {
     const userEmail = requireAiProUser(req, res)
     if (!userEmail) return
 
     const language = String(req.body?.language ?? 'ru').trim().toLowerCase()
     const lang = ['kg', 'ru', 'en'].includes(language) ? language : 'ru'
-    const allowed = resolveAllowedQuestion({ questionId: req.body?.questionId, question: clampText(req.body?.question, 500), language: lang })
-    if (!allowed) {
-      res.status(400).json({ error: QUESTION_NOT_ALLOWED_MESSAGE[lang], code: 'QUESTION_NOT_ALLOWED' })
+    const suggested = typeof req.body?.questionId === 'string' && req.body.questionId.trim()
+      ? resolveAllowedQuestion({ questionId: req.body.questionId, language: lang })
+      : null
+    const question = suggested ? suggested.text : clampText(req.body?.question, AI_QUESTION_MAX)
+    if (!question) {
+      res.status(400).json({ error: 'Question is required.', code: 'QUESTION_REQUIRED' })
       return
     }
+    const topic = clampText(req.body?.topic, 120) || 'programming and web development'
 
-    const answer = getPreparedAnswer(allowed.id, lang)
-    const saved = saveAiExchange(db, { userEmail, question: allowed.text, answer, language: lang, questionId: allowed.id })
-    res.json({ ok: true, source: 'knowledge-base', questionId: allowed.id, question: allowed.text, answer, questionMessageId: saved.questionId, answerId: saved.answerId })
+    const history = db.prepare('SELECT role, content FROM ai_chat_messages WHERE user_email = ? ORDER BY id DESC LIMIT ?')
+      .all(userEmail, AI_CONTEXT_MESSAGES)
+      .reverse()
+      .map((m) => ({ role: m.role, content: String(m.content).slice(0, 4000) }))
+    // The conversation must start with a user turn.
+    while (history.length && history[0].role !== 'user') history.shift()
+
+    let result
+    try {
+      result = await askAssistant({ question, topic, language: lang, history })
+    } catch (error) {
+      if (error instanceof AiError) {
+        res.status(error.status).json({ error: error.message, code: error.code })
+        return
+      }
+      throw error
+    }
+
+    const saved = saveAiExchange(db, { userEmail, question, answer: result.answer, language: lang, questionId: null })
+    res.json({ ok: true, source: 'ai', question, answer: result.answer, truncated: result.truncated, questionMessageId: saved.questionId, answerId: saved.answerId })
   } catch (err) {
     sendServerError(res, err, 'AI service error')
   }
